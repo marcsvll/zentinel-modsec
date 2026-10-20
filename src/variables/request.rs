@@ -71,12 +71,16 @@ impl RequestData {
         self.uri = uri.to_string();
         self.uri_raw = uri.to_string();
 
+        // ModSecurity sees the path the web server hands it: percent-decoded.
+        // REQUEST_FILENAME/REQUEST_BASENAME are built from it, so CRS rules with
+        // `t:none` (933160, 932130, ...) match `/post/eval%28...%29`; REQUEST_URI
+        // and REQUEST_URI_RAW keep the original bytes.
         if let Some(pos) = uri.find('?') {
-            self.path = uri[..pos].to_string();
+            self.path = percent_decode_path(&uri[..pos]);
             self.query_string = uri[pos + 1..].to_string();
             self.parse_query_string(&self.query_string.clone());
         } else {
-            self.path = uri.to_string();
+            self.path = percent_decode_path(uri);
             self.query_string.clear();
         }
     }
@@ -654,6 +658,31 @@ fn extract_multipart_boundary(content_type: &str) -> Option<String> {
 
 /// Extract a parameter value (e.g. `name`, `filename`) from a
 /// Content-Disposition header value.
+/// Decodes `%XX` escapes in a URI path. `+` is not a space in a path, an
+/// incomplete or non-hex escape is left as written, and bytes that do not form
+/// UTF-8 become U+FFFD (the engine works on `str`).
+fn percent_decode_path(path: &str) -> String {
+    if !path.contains('%') {
+        return path.to_string();
+    }
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = |b: u8| (b as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn extract_disposition_param(header_value: &str, param: &str) -> Option<String> {
     // Parameters are `;`-separated, but a quoted value may contain `;` and
     // backslash-escaped quotes (`name="fi;le"`, `filename="a\"b"`), so the
@@ -765,5 +794,17 @@ mod tests {
         assert_eq!(extract_disposition_param("form-data; name=plain; filename=x.txt", "filename"), Some("x.txt".to_string()));
         assert_eq!(extract_disposition_param(r#"form-data; name=""; filename="""#, "name"), Some(String::new()));
         assert_eq!(extract_disposition_param("form-data; name=\"a\"", "filename"), None);
+    }
+
+    #[test]
+    fn request_filename_is_percent_decoded_and_the_raw_uri_is_kept() {
+        let mut req = RequestData::new();
+        req.set_uri("/post/subSTR%28%24x%29/a%2Fb?q=%41&p=1");
+        assert_eq!(req.path, "/post/subSTR($x)/a/b");
+        assert_eq!(req.query_string, "q=%41&p=1");
+        assert_eq!(req.uri, "/post/subSTR%28%24x%29/a%2Fb?q=%41&p=1");
+        assert_eq!(percent_decode_path("/a%2/b%zz/c%"), "/a%2/b%zz/c%");
+        assert_eq!(percent_decode_path("/plus+is+kept"), "/plus+is+kept");
+        assert_eq!(percent_decode_path("/%c0%af"), "/\u{FFFD}\u{FFFD}");
     }
 }
