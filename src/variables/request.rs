@@ -655,12 +655,40 @@ fn extract_multipart_boundary(content_type: &str) -> Option<String> {
 /// Extract a parameter value (e.g. `name`, `filename`) from a
 /// Content-Disposition header value.
 fn extract_disposition_param(header_value: &str, param: &str) -> Option<String> {
-    for part in header_value.split(';') {
-        let part = part.trim();
-        if let Some((key, value)) = part.split_once('=') {
-            if key.trim().eq_ignore_ascii_case(param) {
-                return Some(value.trim().trim_matches('"').to_string());
+    // Parameters are `;`-separated, but a quoted value may contain `;` and
+    // backslash-escaped quotes (`name="fi;le"`, `filename="a\"b"`), so the
+    // split happens outside quotes only. The quoted content is kept verbatim.
+    let mut params: Vec<String> = vec![String::new()];
+    let mut quoted = false;
+    let mut chars = header_value.chars();
+    while let Some(c) = chars.next() {
+        let current = params.last_mut().expect("params is never empty");
+        match c {
+            '"' => {
+                quoted = !quoted;
+                current.push(c);
             }
+            '\\' if quoted => {
+                current.push(c);
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            ';' if !quoted => params.push(String::new()),
+            _ => current.push(c),
+        }
+    }
+    for part in params {
+        let Some((key, value)) = part.trim().split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case(param) {
+            let value = value.trim();
+            let unquoted = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value);
+            return Some(unquoted.to_string());
         }
     }
     None
@@ -727,5 +755,30 @@ mod tests {
         req.append_body(b"irrelevant");
         assert!(!req.parse_multipart_body("multipart/form-data"));
         assert!(req.body_processor.is_empty());
+    }
+
+    #[test]
+    fn disposition_params_keep_semicolons_and_escapes_inside_quotes() {
+        let h = r#"form-data; name="fi;le"; filename="te\"st.j\s\p""#;
+        assert_eq!(
+            extract_disposition_param(h, "name"),
+            Some("fi;le".to_string())
+        );
+        assert_eq!(
+            extract_disposition_param(h, "filename"),
+            Some(r#"te\"st.j\s\p"#.to_string())
+        );
+        assert_eq!(
+            extract_disposition_param("form-data; name=plain; filename=x.txt", "filename"),
+            Some("x.txt".to_string())
+        );
+        assert_eq!(
+            extract_disposition_param(r#"form-data; name=""; filename="""#, "name"),
+            Some(String::new())
+        );
+        assert_eq!(
+            extract_disposition_param("form-data; name=\"a\"", "filename"),
+            None
+        );
     }
 }
