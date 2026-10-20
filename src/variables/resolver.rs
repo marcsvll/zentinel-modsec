@@ -440,7 +440,10 @@ impl<'a> VariableResolver<'a> {
                 }
             }
             Some(Selection::Regex(pattern)) => {
-                if let Ok(re) = Regex::new(pattern) {
+                // TX keys are case-insensitive (stored lowercased), so the
+                // selection pattern must be too: CRS writes
+                // `TX:/MULTIPART_HEADERS_CONTENT_TYPES_*/`.
+                if let Ok(re) = Regex::new(&format!("(?i){pattern}")) {
                     self.tx
                         .get_regex(&re)
                         .into_iter()
