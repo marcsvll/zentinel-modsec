@@ -13,8 +13,10 @@ use crate::actions::{
 };
 use crate::error::Result;
 use crate::operators::{compile_operator, Operator};
-use crate::parser::OperatorSpec;
-use crate::variables::{Collection, RequestData, ResponseData, TxCollection, VariableResolver};
+use crate::parser::{Action, DataAction, OperatorSpec};
+use crate::variables::{
+    Collection, MutableCollection, RequestData, ResponseData, TxCollection, VariableResolver,
+};
 
 /// Whether a lowercased Content-Type denotes a JSON body.
 ///
@@ -478,6 +480,14 @@ impl Transaction {
             let captures = outcome.captures;
 
             if matched {
+                // `capture`: the operator's match and groups become TX:0..TX:9
+                // for the rest of the transaction, as in ModSecurity, so a
+                // `setvar:tx.x=%{tx.1}` on this rule, or a `TX:1` target in the
+                // next chain link, sees them.
+                if has_capture(rule) {
+                    let full = outcome.matched_variable.as_ref().and_then(|v| v.portion.clone());
+                    self.store_captures(full, &captures);
+                }
                 // MATCHED_VARS is scoped to the current rule in ModSecurity,
                 // so this replaces rather than appends -- otherwise a later
                 // rule would read the previous rule's matches.
@@ -777,6 +787,20 @@ impl Transaction {
         Ok(RuleOutcome::no_match())
     }
 
+    /// Publish a `capture` result as `TX:0` (the whole match) and `TX:1..TX:9`
+    /// (the groups), replacing the previous rule's captures.
+    fn store_captures(&mut self, full: Option<String>, groups: &[String]) {
+        for i in 0..10usize {
+            let key = i.to_string();
+            let value = if i == 0 { full.clone() } else { groups.get(i - 1).cloned() };
+            match value {
+                Some(v) => self.tx.set(key, v),
+                None => self.tx.delete(&key),
+            }
+        }
+        self.captures = groups.to_vec();
+    }
+
     /// Expand `%{...}` macros in an operator argument against current TX state.
     ///
     /// Only the `TX`/`tx` collection is resolved (the source of operator-argument
@@ -829,6 +853,11 @@ impl Transaction {
 /// Interpret an already-expanded setvar right-hand side into a concrete
 /// operation, honouring a leading `+`/`-` for increment/decrement. An empty or
 /// non-numeric increment/decrement (e.g. an unresolved macro) becomes a no-op.
+/// Whether a rule carries the `capture` action.
+fn has_capture(rule: &CompiledRule) -> bool {
+    rule.actions.iter().any(|a| matches!(a, Action::Data(DataAction::Capture)))
+}
+
 fn interpret_setvar_rhs(value: &str) -> SetVarOperation {
     if let Some(rest) = value.strip_prefix('+') {
         SetVarOperation::Increment(rest.trim().parse().unwrap_or(0))
@@ -1059,5 +1088,25 @@ mod tests {
         assert_eq!(tx.matched_rules(), &["100".to_string()]);
         let intervention = tx.intervention().expect("chain blocks");
         assert_eq!(intervention.rule_ids, vec!["100".to_string()]);
+    }
+
+    fn tx_var(tx: &Transaction, key: &str) -> Option<String> {
+        tx.tx().get(key).and_then(|v| v.first().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn capture_publishes_the_match_and_groups_as_tx_0_to_9() {
+        let ruleset = make_ruleset(r#"
+            SecRule REQUEST_URI "@rx ^/(\w+)/(\w+)" "id:1,phase:1,pass,capture,setvar:tx.first=%{tx.1}"
+            SecRule REQUEST_URI "@rx ^/(\w+)" "id:3,phase:1,pass"
+            SecRule TX:2 "@rx ^second$" "id:2,phase:1,deny"
+        "#);
+        let mut tx = Transaction::new(ruleset, 403);
+        tx.process_uri("/first/second", "GET", "HTTP/1.1").unwrap();
+        tx.process_request_headers().unwrap();
+        assert_eq!(tx_var(&tx, "0"), Some("/first/second".to_string()));
+        assert_eq!(tx_var(&tx, "1"), Some("first".to_string()));
+        assert_eq!(tx_var(&tx, "first"), Some("first".to_string()));
+        assert!(tx.has_intervention(), "TX:2 holds the second group; rule 3 has no capture");
     }
 }
