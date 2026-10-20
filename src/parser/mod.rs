@@ -541,18 +541,66 @@ impl Default for Parser {
 /// Check if two actions are of the same specific type (including inner variants).
 fn actions_same_type(a: &Action, b: &Action) -> bool {
     match (a, b) {
-        // For Metadata, compare inner variants
+        // Repeatable actions accumulate: a rule carries several `t:`, `tag:`,
+        // `setvar:` and `ctl:` actions, and each one must survive the merge.
+        // Treating them as "the same type" kept only the last one, so CRS's
+        // `t:none,t:urlDecodeUni,t:lowercase` ran as `t:lowercase` alone.
+        (Action::Transformation(_), Action::Transformation(_))
+        | (Action::Metadata(MetadataAction::Tag(_)), Action::Metadata(MetadataAction::Tag(_)))
+        | (Action::Data(DataAction::SetVar(_)), Action::Data(DataAction::SetVar(_)))
+        | (Action::Control(_), Action::Control(_)) => false,
+        // For Metadata and Data, compare inner variants: `capture` and
+        // `setvar` are different actions, not two of the same kind.
         (Action::Metadata(ma), Action::Metadata(mb)) => {
             std::mem::discriminant(ma) == std::mem::discriminant(mb)
         }
+        (Action::Data(da), Action::Data(db)) => {
+            std::mem::discriminant(da) == std::mem::discriminant(db)
+        }
+        // Logging actions come in exclusive pairs: `nolog` replaces `log`,
+        // `noauditlog` replaces `auditlog`, and the pairs are independent.
+        (Action::Logging(la), Action::Logging(lb)) => logging_group(la) == logging_group(lb),
         // For other action types, compare outer variants
         _ => std::mem::discriminant(a) == std::mem::discriminant(b),
+    }
+}
+
+/// Which exclusive pair a logging action belongs to.
+fn logging_group(action: &LoggingAction) -> u8 {
+    match action {
+        LoggingAction::Log | LoggingAction::NoLog => 0,
+        LoggingAction::AuditLog | LoggingAction::NoAuditLog => 1,
+        _ => 2,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_actions_survive_default_action_merge() {
+        let mut parser = Parser::new();
+        parser
+            .parse(
+                "SecDefaultAction \"phase:2,log,auditlog,pass\"\nSecRule ARGS \"@rx a\" \"id:1,phase:2,block,capture,t:none,t:urlDecodeUni,t:lowercase,tag:'a',tag:'b',setvar:'tx.x=1',setvar:'tx.y=2',ctl:ruleRemoveById=2,ctl:ruleRemoveById=3,nolog,noauditlog\"",
+            )
+            .unwrap();
+        let Directive::SecRule(rule) = &parser.directives[1] else { panic!("expected SecRule") };
+        let count = |pred: &dyn Fn(&Action) -> bool| rule.actions.iter().filter(|a| pred(a)).count();
+        assert_eq!(count(&|a| matches!(a, Action::Transformation(_))), 3);
+        assert_eq!(count(&|a| matches!(a, Action::Metadata(MetadataAction::Tag(_)))), 2);
+        assert_eq!(count(&|a| matches!(a, Action::Data(DataAction::SetVar(_)))), 2);
+        assert_eq!(count(&|a| matches!(a, Action::Control(_))), 2);
+        // `capture` is a different data action from `setvar` and survives too.
+        assert_eq!(count(&|a| matches!(a, Action::Data(DataAction::Capture))), 1);
+        // `nolog` replaces the default `log`, `noauditlog` the default `auditlog`.
+        assert_eq!(count(&|a| matches!(a, Action::Logging(LoggingAction::NoLog))), 1);
+        assert_eq!(count(&|a| matches!(a, Action::Logging(LoggingAction::NoAuditLog))), 1);
+        assert_eq!(count(&|a| matches!(a, Action::Logging(LoggingAction::Log | LoggingAction::AuditLog))), 0);
+        // Non-repeatable actions still override the defaults.
+        assert_eq!(count(&|a| matches!(a, Action::Metadata(MetadataAction::Phase(_)))), 1);
+    }
 
     #[test]
     fn test_parse_simple_rule() {
