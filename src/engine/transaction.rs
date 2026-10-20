@@ -831,11 +831,11 @@ impl Transaction {
         self.captures = groups.to_vec();
     }
 
-    /// Expand `%{...}` macros in an operator argument against current TX state.
-    ///
-    /// Only the `TX`/`tx` collection is resolved (the source of operator-argument
-    /// macros in CRS, e.g. thresholds and `tx.allowed_methods`); an unresolved
-    /// macro expands to an empty string, matching ModSecurity behaviour.
+    /// Expand `%{...}` macros in an operator argument or a `setvar` against
+    /// the transaction: `tx.*` (with the `capture` slots `tx.0`..`tx.9`),
+    /// `MATCHED_VAR`, `MATCHED_VAR_NAME`, `REMOTE_ADDR`, `request_headers.<name>`
+    /// and `args.<name>`. An unresolved macro expands to the empty string,
+    /// matching ModSecurity behaviour.
     fn expand_operator_macros(&self, arg: &str) -> String {
         // Compiled once: this runs on every evaluation of an operator whose
         // argument contains `%{`.
@@ -845,49 +845,83 @@ impl Transaction {
         MACRO
             .replace_all(arg, |caps: &regex::Captures| {
                 let inner = &caps[1];
-                let (collection, name) = match inner.split_once('.') {
+                if inner.eq_ignore_ascii_case("MATCHED_VAR") {
+                    return self
+                        .matched_vars
+                        .last()
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default();
+                }
+                if inner.eq_ignore_ascii_case("MATCHED_VAR_NAME") {
+                    return self
+                        .matched_vars
+                        .last()
+                        .map(|(n, _)| n.clone())
+                        .unwrap_or_default();
+                }
+                if inner.eq_ignore_ascii_case("REMOTE_ADDR") {
+                    return self.request.client_ip.clone();
+                }
+                let (collection, name) = match inner.split_once(['.', ':']) {
                     Some((c, n)) => (c.to_ascii_lowercase(), n),
                     None => ("tx".to_string(), inner),
                 };
-                if collection == "tx" {
-                    self.tx
-                        .get(name)
-                        .and_then(|v| v.first().map(|s| s.to_string()))
-                        .unwrap_or_default()
-                } else {
-                    String::new()
+                match collection.as_str() {
+                    "tx" => first_value(self.tx.get(name)),
+                    "request_headers" => {
+                        first_value(self.request.headers.get(&name.to_ascii_lowercase()))
+                    }
+                    "args" => first_value(
+                        self.request
+                            .args_get
+                            .get(name)
+                            .or_else(|| self.request.args_post.get(name)),
+                    ),
+                    _ => String::new(),
                 }
             })
             .into_owned()
     }
 
-    /// Apply a setvar operation.
+    /// Apply a setvar operation. Macros are expanded in the value
+    /// (`+%{tx.critical_anomaly_score}`) and in the name
+    /// (`tx.header_name_%{tx.0}`), here, where TX state is available.
     fn apply_setvar(&mut self, op: &SetVarOp) {
-        // A macro-bearing value (e.g. `+%{tx.critical_anomaly_score}`) is
-        // resolved here, where TX state is available, then re-interpreted as a
-        // concrete set/increment/decrement.
-        if let SetVarOperation::Macro(raw) = &op.operation {
-            let expanded = self.expand_operator_macros(raw);
-            let resolved = SetVarOp {
-                collection: op.collection.clone(),
-                name: op.name.clone(),
-                operation: interpret_setvar_rhs(&expanded),
-            };
-            crate::actions::apply_setvar(&mut self.tx, &resolved);
+        let name = if op.name.contains("%{") {
+            self.expand_operator_macros(&op.name)
         } else {
-            crate::actions::apply_setvar(&mut self.tx, op);
+            op.name.clone()
+        };
+        match &op.operation {
+            SetVarOperation::Macro(raw) => {
+                let expanded = self.expand_operator_macros(raw);
+                let resolved = SetVarOp {
+                    collection: op.collection.clone(),
+                    name: name.clone(),
+                    operation: interpret_setvar_rhs(&expanded),
+                };
+                crate::actions::apply_setvar(&mut self.tx, &resolved);
+            }
+            SetVarOperation::Set(value) => self.tx.set(name.clone(), value.clone()),
+            SetVarOperation::Increment(delta) => self.tx.increment(&name, *delta),
+            SetVarOperation::Decrement(delta) => self.tx.decrement(&name, *delta),
+            SetVarOperation::Delete => self.tx.delete(&name),
         }
 
         // Sync anomaly score from TX if relevant
-        if op.name == "anomaly_score" {
+        if name == "anomaly_score" {
             self.anomaly_score.sync_from_tx(&self.tx);
         }
     }
 }
 
-/// Interpret an already-expanded setvar right-hand side into a concrete
-/// operation, honouring a leading `+`/`-` for increment/decrement. An empty or
-/// non-numeric increment/decrement (e.g. an unresolved macro) becomes a no-op.
+/// First value of a collection lookup, or the empty string.
+fn first_value(values: Option<Vec<&str>>) -> String {
+    values
+        .and_then(|v| v.first().map(|s| (*s).to_string()))
+        .unwrap_or_default()
+}
+
 /// Whether a rule carries the `capture` action.
 fn has_capture(rule: &CompiledRule) -> bool {
     rule.actions
@@ -1237,5 +1271,26 @@ mod tests {
         assert_eq!(tx.matched_rules(), &["1".to_string()]);
         assert_eq!(tx_var(&tx, "ct"), Some("|my/type|".to_string()));
         assert_eq!(tx_var(&tx, "score"), Some("5".to_string()));
+    }
+
+    #[test]
+    fn macros_resolve_matched_var_request_headers_and_setvar_names() {
+        let ruleset = make_ruleset(
+            r#"
+            SecRule ARGS:q "@contains evil" "id:1,phase:2,pass,setvar:'tx.seen_%{MATCHED_VAR_NAME}=%{MATCHED_VAR}'"
+            SecRule TX:/^seen_/ "!@endsWith %{request_headers.host}" "id:2,phase:2,deny"
+        "#,
+        );
+        let mut tx = Transaction::new(ruleset, 403);
+        tx.process_uri("/?q=evil-payload", "GET", "HTTP/1.1")
+            .unwrap();
+        tx.add_request_header("Host", "example.com").unwrap();
+        tx.process_request_headers().unwrap();
+        tx.process_request_body().unwrap();
+        assert_eq!(tx_var(&tx, "seen_args:q"), Some("evil-payload".to_string()));
+        assert!(
+            tx.has_intervention(),
+            "evil-payload does not end with example.com"
+        );
     }
 }
