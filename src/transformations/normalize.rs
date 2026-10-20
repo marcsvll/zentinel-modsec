@@ -251,15 +251,11 @@ pub struct NormalizePathWin;
 
 impl Transformation for NormalizePathWin {
     fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
-        // Same as NormalizePath but preserves backslashes
-        let np = NormalizePath;
-        let result = np.transform(input);
-        // Convert back to backslashes
-        if result.contains('/') {
-            Cow::Owned(result.replace('/', "\\"))
-        } else {
-            result
-        }
+        // ModSecurity: backslashes become forward slashes first, then the path
+        // is normalized like normalizePath. The result keeps forward slashes;
+        // turning them back into backslashes made `/etc/passwd` unmatchable
+        // for every CRS rule that uses this transformation.
+        NormalizePath.transform(input)
     }
 
     fn name(&self) -> &'static str {
@@ -651,5 +647,12 @@ mod tests {
         assert_eq!(t.transform("cat /etc/passwd"), "cat/etc/passwd");
         // Nothing to change: borrowed, not reallocated.
         assert!(matches!(t.transform("already normal"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn normalize_path_win_keeps_forward_slashes() {
+        let t = NormalizePathWin;
+        assert_eq!(t.transform(r"\etc\\passwd"), "/etc/passwd");
+        assert_eq!(t.transform("/.claude/settings.json"), "/.claude/settings.json");
     }
 }
