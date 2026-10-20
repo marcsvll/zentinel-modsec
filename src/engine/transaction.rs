@@ -518,9 +518,15 @@ impl Transaction {
                 }
 
                 if rule.is_chain {
-                    // A link that expects more links after it. Hold the
-                    // starter's actions: nothing may fire until the whole
-                    // chain has matched.
+                    // A link that expects more links after it. Its `setvar`s
+                    // take effect now, as in ModSecurity: CRS writes a value in
+                    // the starter and reads it in the next link. Disruptive,
+                    // flow and metadata actions wait until the whole chain has
+                    // matched, so they are held with the starter's result.
+                    let mut action_result = action_result;
+                    for op in std::mem::take(&mut action_result.setvar_ops) {
+                        self.apply_setvar(&op);
+                    }
                     if !chain_state.in_chain {
                         chain_state.start_chain(idx);
                         pending_chain_actions = Some(action_result);
@@ -542,8 +548,15 @@ impl Transaction {
                     if let Some(ref id) = fired_id {
                         self.matched_rules.push(id.clone());
                     }
+                    // The last link's own `setvar`s (CRS puts the anomaly score
+                    // increments there) run now; the starter's held actions
+                    // then take over for the disruptive and flow part.
+                    let mut last = action_result;
+                    for op in std::mem::take(&mut last.setvar_ops) {
+                        self.apply_setvar(&op);
+                    }
                     chain_state.reset();
-                    pending_chain_actions.take().unwrap_or(action_result)
+                    pending_chain_actions.take().unwrap_or(last)
                 } else {
                     action_result
                 };
@@ -1108,5 +1121,20 @@ mod tests {
         assert_eq!(tx_var(&tx, "1"), Some("first".to_string()));
         assert_eq!(tx_var(&tx, "first"), Some("first".to_string()));
         assert!(tx.has_intervention(), "TX:2 holds the second group; rule 3 has no capture");
+    }
+
+    #[test]
+    fn chain_links_apply_setvar_as_they_match_and_the_last_link_scores() {
+        let ruleset = make_ruleset(r#"
+            SecRule REQUEST_HEADERS:Content-Type "@rx ^[^;\s]+" "id:1,phase:1,pass,capture,setvar:'tx.ct=|%{tx.0}|',chain"
+                SecRule TX:ct "!@within |text/plain|" "setvar:tx.score=+5"
+        "#);
+        let mut tx = Transaction::new(ruleset, 403);
+        tx.process_uri("/", "POST", "HTTP/1.1").unwrap();
+        tx.add_request_header("Content-Type", "my/type; charset=utf-8").unwrap();
+        tx.process_request_headers().unwrap();
+        assert_eq!(tx.matched_rules(), &["1".to_string()]);
+        assert_eq!(tx_var(&tx, "ct"), Some("|my/type|".to_string()));
+        assert_eq!(tx_var(&tx, "score"), Some("5".to_string()));
     }
 }
