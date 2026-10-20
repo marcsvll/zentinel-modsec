@@ -494,9 +494,13 @@ impl Transaction {
                 // Execute actions
                 let action_result = execute_actions(&rule.actions, None, &captures);
 
-                // Track matched rule
-                if let Some(ref id) = rule.id {
-                    self.matched_rules.push(id.clone());
+                // Track matched rule. A chain is one logical rule identified
+                // by its starter: it is reported only once every link has
+                // matched (below), not when the starter alone does.
+                if !rule.is_chain && !chain_state.in_chain {
+                    if let Some(ref id) = rule.id {
+                        self.matched_rules.push(id.clone());
+                    }
                 }
 
                 if rule.is_chain {
@@ -515,7 +519,15 @@ impl Transaction {
                 // Either a standalone rule, or the final link of a chain that
                 // has now matched in full. A completed chain executes the
                 // starter's actions, not the last link's.
+                let fired_id = if chain_state.in_chain {
+                    chain_state.chain_start.and_then(|i| rules[i].id.clone())
+                } else {
+                    rule.id.clone()
+                };
                 let action_result = if chain_state.in_chain {
+                    if let Some(ref id) = fired_id {
+                        self.matched_rules.push(id.clone());
+                    }
                     chain_state.reset();
                     pending_chain_actions.take().unwrap_or(action_result)
                 } else {
@@ -560,7 +572,7 @@ impl Transaction {
                         DisruptiveOutcome::Deny(status) => {
                             if should_block {
                                 let mut intervention =
-                                    Intervention::deny(status, phase, rule.id.clone());
+                                    Intervention::deny(status, phase, fired_id.clone());
                                 intervention.add_metadata(action_result.metadata);
                                 self.intervention = Some(intervention);
                                 return Ok(());
@@ -568,8 +580,11 @@ impl Transaction {
                         }
                         DisruptiveOutcome::Block => {
                             if should_block {
-                                let mut intervention =
-                                    Intervention::deny(self.default_status, phase, rule.id.clone());
+                                let mut intervention = Intervention::deny(
+                                    self.default_status,
+                                    phase,
+                                    fired_id.clone(),
+                                );
                                 intervention.add_metadata(action_result.metadata);
                                 self.intervention = Some(intervention);
                                 return Ok(());
@@ -582,7 +597,7 @@ impl Transaction {
                         DisruptiveOutcome::Redirect(url) => {
                             if should_block {
                                 let mut intervention =
-                                    Intervention::redirect(url, phase, rule.id.clone());
+                                    Intervention::redirect(url, phase, fired_id.clone());
                                 intervention.add_metadata(action_result.metadata);
                                 self.intervention = Some(intervention);
                                 return Ok(());
@@ -590,7 +605,7 @@ impl Transaction {
                         }
                         DisruptiveOutcome::Drop => {
                             if should_block {
-                                let mut intervention = Intervention::drop(phase, rule.id.clone());
+                                let mut intervention = Intervention::drop(phase, fired_id.clone());
                                 intervention.add_metadata(action_result.metadata);
                                 self.intervention = Some(intervention);
                                 return Ok(());
@@ -1092,5 +1107,39 @@ mod tests {
         // Should match but not block
         assert!(!tx.has_intervention());
         assert!(tx.matched_rules().contains(&"1".to_string()));
+    }
+
+    #[test]
+    fn chain_starter_is_not_reported_when_a_later_link_fails() {
+        let ruleset = make_ruleset(
+            r#"
+            SecRule REQUEST_URI "@contains /admin" "id:100,phase:1,deny,chain"
+                SecRule REQUEST_HEADERS:User-Agent "@contains evil" "t:none"
+            SecRule REQUEST_URI "@contains /admin" "id:200,phase:1,pass"
+        "#,
+        );
+        let mut tx = Transaction::new(ruleset, 403);
+        tx.process_uri("/admin", "GET", "HTTP/1.1").unwrap();
+        tx.add_request_header("User-Agent", "friendly").unwrap();
+        tx.process_request_headers().unwrap();
+        assert!(!tx.has_intervention());
+        assert_eq!(tx.matched_rules(), &["200".to_string()]);
+    }
+
+    #[test]
+    fn completed_chain_is_reported_and_blocks_under_the_starter_id() {
+        let ruleset = make_ruleset(
+            r#"
+            SecRule REQUEST_URI "@contains /admin" "id:100,phase:1,deny,chain"
+                SecRule REQUEST_HEADERS:User-Agent "@contains evil" "t:none"
+        "#,
+        );
+        let mut tx = Transaction::new(ruleset, 403);
+        tx.process_uri("/admin", "GET", "HTTP/1.1").unwrap();
+        tx.add_request_header("User-Agent", "evil bot").unwrap();
+        tx.process_request_headers().unwrap();
+        assert_eq!(tx.matched_rules(), &["100".to_string()]);
+        let intervention = tx.intervention().expect("chain blocks");
+        assert_eq!(intervention.rule_ids, vec!["100".to_string()]);
     }
 }
