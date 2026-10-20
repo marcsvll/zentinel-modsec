@@ -1293,4 +1293,18 @@ mod tests {
             "evil-payload does not end with example.com"
         );
     }
+
+    #[test]
+    fn tx_regex_selection_is_case_insensitive_like_tx_keys() {
+        let ruleset = make_ruleset(
+            r#"
+            SecAction "id:1,phase:1,pass,setvar:tx.multipart_headers_content_types_0=text/plain"
+            SecRule TX:/MULTIPART_HEADERS_CONTENT_TYPES_*/ "@contains text/plain" "id:2,phase:1,deny"
+        "#,
+        );
+        let mut tx = Transaction::new(ruleset, 403);
+        tx.process_uri("/", "GET", "HTTP/1.1").unwrap();
+        tx.process_request_headers().unwrap();
+        assert!(tx.has_intervention());
+    }
 }
