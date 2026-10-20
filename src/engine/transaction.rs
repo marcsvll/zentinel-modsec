@@ -322,6 +322,13 @@ impl Transaction {
         Ok(())
     }
 
+    /// Set the response status code (`RESPONSE_STATUS`). Call it before
+    /// [`process_response_headers`](Self::process_response_headers): CRS 950100
+    /// and the 95x response rules read it in phase 3 and 4.
+    pub fn set_response_status(&mut self, status: u16) {
+        self.response.set_status(status);
+    }
+
     /// Process response headers (Phase 3).
     pub fn process_response_headers(&mut self) -> Result<()> {
         self.phase = Phase::ResponseHeaders;
@@ -1184,5 +1191,21 @@ mod tests {
         tx.process_uri("/", "GET", "HTTP/1.1").unwrap();
         tx.process_request_headers().unwrap();
         assert!(tx.has_intervention());
+    }
+
+    #[test]
+    fn response_status_is_visible_to_response_phase_rules() {
+        let ruleset = make_ruleset(r#"
+            SecRule RESPONSE_STATUS "@rx ^5\d{2}$" "id:950100,phase:3,deny"
+        "#);
+        let mut tx = Transaction::new(ruleset, 403);
+        tx.process_uri("/", "GET", "HTTP/1.1").unwrap();
+        tx.process_request_headers().unwrap();
+        tx.process_request_body().unwrap();
+        tx.set_response_status(500);
+        tx.add_response_header("Content-Type", "text/html").unwrap();
+        tx.process_response_headers().unwrap();
+        assert!(tx.has_intervention(), "RESPONSE_STATUS 500 matches ^5\\d{{2}}$");
+        assert_eq!(tx.matched_rules(), &["950100".to_string()]);
     }
 }
