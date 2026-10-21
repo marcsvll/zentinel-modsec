@@ -561,6 +561,14 @@ impl Transaction {
                     for op in std::mem::take(&mut last.setvar_ops) {
                         self.apply_setvar(&op);
                     }
+                    // So do its `ctl` overrides: in ModSecurity a link's
+                    // non-disruptive actions run when the link matches, and
+                    // exclusion rules (the CRS plugins, generated overlays)
+                    // put `ctl:ruleRemoveById` on the last link, after the
+                    // path and method conditions.
+                    for ctl in &std::mem::take(&mut last.control_ops) {
+                        self.controls.apply(CtlDirective::parse(ctl));
+                    }
                     chain_state.reset();
                     pending_chain_actions.take().unwrap_or(last)
                 } else {
@@ -1278,6 +1286,33 @@ mod tests {
         assert_eq!(tx.matched_rules(), &["1".to_string()]);
         assert_eq!(tx_var(&tx, "ct"), Some("|my/type|".to_string()));
         assert_eq!(tx_var(&tx, "score"), Some("5".to_string()));
+    }
+
+    #[test]
+    fn the_last_chain_link_applies_its_ctl_when_the_chain_matches() {
+        let ruleset = make_ruleset(
+            r#"
+            SecRule REQUEST_FILENAME "@streq /api/inventory" "id:10,phase:1,pass,nolog,chain"
+                SecRule REQUEST_METHOD "@pm GET" "t:none,ctl:ruleRemoveById=20"
+            SecRule ARGS "@contains evil" "id:20,phase:1,deny"
+        "#,
+        );
+        let mut tx = Transaction::new(ruleset.clone(), 403);
+        tx.process_uri("/api/inventory?q=evil", "GET", "HTTP/1.1")
+            .unwrap();
+        tx.process_request_headers().unwrap();
+        assert!(
+            !tx.has_intervention(),
+            "the chain matched: rule 20 is removed"
+        );
+        let mut tx = Transaction::new(ruleset, 403);
+        tx.process_uri("/api/inventory?q=evil", "POST", "HTTP/1.1")
+            .unwrap();
+        tx.process_request_headers().unwrap();
+        assert!(
+            tx.has_intervention(),
+            "the method link failed: rule 20 still runs"
+        );
     }
 
     #[test]
