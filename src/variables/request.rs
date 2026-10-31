@@ -48,6 +48,14 @@ pub struct RequestData {
     pub body_error: Option<String>,
     /// Request body.
     pub body: Vec<u8>,
+    /// The XML body's text, as ModSecurity's `XML:/*` yields it: the content of
+    /// the document element, that is every text node (and CDATA section) of the
+    /// document in order, as one value. Empty when the body was not XML or had
+    /// no text. Populated by the XML body processor.
+    pub xml_text: Vec<String>,
+    /// Every attribute value of the XML body, in document order, as
+    /// ModSecurity's `XML://@*` yields them. Populated by the XML body processor.
+    pub xml_attributes: Vec<String>,
     /// Client IP address.
     pub client_ip: String,
     /// Client port.
@@ -308,27 +316,27 @@ impl RequestData {
         Ok(())
     }
 
-    /// Parse an XML body, flattening element text and attributes into
-    /// `args_post`.
+    /// Parse an XML body into what ModSecurity's two XML selectors yield.
     ///
-    /// ModSecurity exposes XML through an XPath-selected `XML:` variable. That
-    /// needs an XPath engine, which this does not have — so instead each text
-    /// node and attribute becomes an argument named by its element path,
-    /// prefixed `xml.`:
+    /// ModSecurity exposes XML through an XPath-selected `XML:` variable. The
+    /// only selectors the CRS writes are `XML:/*`, which libxml2 answers with
+    /// the content of the document element (every text node of the document,
+    /// in order, as one value), and `XML://@*`, every attribute value. Those
+    /// two sets are collected here, in `xml_text` and `xml_attributes`:
     ///
     /// ```text
     /// <order><item id="7">widget</item></order>
-    ///   -> xml.order.item      = widget
-    ///      xml.order.item.@id  = 7
+    ///   -> XML:/*    = widget
+    ///      XML://@*  = 7
     /// ```
     ///
-    /// That is not ModSecurity-compatible naming, and rules written against
-    /// `XML:/order/item` will not match it. It is chosen because the
-    /// alternative was leaving XML bodies uninspected entirely: with this,
-    /// `SecRule ARGS "@detectSQLi"` covers XML payloads the same way it covers
-    /// form and JSON ones, which is what the common rulesets actually do.
+    /// Element and attribute *names* are not values, as in ModSecurity: CRS
+    /// 944100 inspects `ARGS_NAMES|XML:/*|XML://@*` for `java.lang.runtime`
+    /// and must not fire on `<java.lang.Runtime>value</java.lang.Runtime>`.
+    /// Nothing goes into `ARGS`, which ModSecurity leaves alone for an XML
+    /// body; a rule set that inspects only `ARGS` does not see XML here either.
     ///
-    /// The whole document's text is also available as `REQUEST_BODY`.
+    /// The whole document is also available as `REQUEST_BODY`.
     pub fn parse_xml_body(&mut self) -> Result<(), String> {
         use quick_xml::events::Event;
 
@@ -341,30 +349,44 @@ impl RequestData {
         let mut reader = quick_xml::Reader::from_reader(self.body.as_slice());
         reader.config_mut().check_end_names = true;
 
-        let mut path: Vec<String> = Vec::new();
-        // Text arrives in fragments, split around entity references. Buffering
-        // per element and flushing on the closing tag keeps a value whole: a
-        // payload written as `UNION&#32;SELECT` would otherwise be split into
-        // pieces small enough for every rule to miss.
-        let mut text: Vec<String> = Vec::new();
-        let mut count = 0usize;
+        let mut depth = 0usize;
+        // Elements and attribute values are counted against MAX_XML_ARGS: a body
+        // with tens of thousands of nodes is reported through REQBODY_ERROR
+        // rather than parsed in full.
+        let mut nodes = 0usize;
+        // Text arrives in fragments, split around entity references; they are
+        // appended to one document text, so a payload written as
+        // `UNION&#32;SELECT` stays whole for every rule.
+        let mut text = String::new();
         let mut unresolved_entity: Option<String> = None;
         let mut buf = Vec::new();
 
-        macro_rules! cap {
-            ($name:expr, $value:expr) => {
-                if push_xml_arg(&$name, $value, &mut self.args_post, &mut count) {
-                    let msg = xml_limit_message();
-                    self.body_error = Some(msg.clone());
-                    return Err(msg);
+        macro_rules! attributes {
+            ($e:expr) => {
+                nodes += 1;
+                for attr in $e.attributes().flatten() {
+                    nodes += 1;
+                    if nodes > MAX_XML_ARGS {
+                        let msg = xml_limit_message();
+                        self.body_error = Some(msg.clone());
+                        return Err(msg);
+                    }
+                    let value = attr
+                        .decoded_and_normalized_value(
+                            quick_xml::XmlVersion::Implicit1_0,
+                            reader.decoder(),
+                        )
+                        .map(|v| v.into_owned())
+                        .unwrap_or_default();
+                    self.xml_attributes.push(value);
                 }
             };
         }
 
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                    if path.len() >= MAX_XML_DEPTH {
+                Ok(Event::Start(e)) => {
+                    if depth >= MAX_XML_DEPTH {
                         let msg = format!(
                             "XML body exceeded {MAX_XML_DEPTH} levels of nesting; \
                              only part of the body was inspected"
@@ -372,51 +394,40 @@ impl RequestData {
                         self.body_error = Some(msg.clone());
                         return Err(msg);
                     }
-                    path.push(decode_name(e.name().as_ref()));
-                    text.push(String::new());
-
-                    for attr in e.attributes().flatten() {
-                        let attr_name = decode_name(attr.key.as_ref());
-                        let value = attr
-                            .decoded_and_normalized_value(
-                                quick_xml::XmlVersion::Implicit1_0,
-                                reader.decoder(),
-                            )
-                            .map(|v| v.into_owned())
-                            .unwrap_or_default();
-                        let name = format!("xml.{}.@{}", path.join("."), attr_name);
-                        cap!(name, value);
+                    depth += 1;
+                    attributes!(e);
+                    if nodes > MAX_XML_ARGS {
+                        let msg = xml_limit_message();
+                        self.body_error = Some(msg.clone());
+                        return Err(msg);
+                    }
+                }
+                Ok(Event::Empty(e)) => {
+                    attributes!(e);
+                    if nodes > MAX_XML_ARGS {
+                        let msg = xml_limit_message();
+                        self.body_error = Some(msg.clone());
+                        return Err(msg);
                     }
                 }
                 Ok(Event::End(_)) => {
-                    if let Some(collected) = text.pop() {
-                        let trimmed = collected.trim();
-                        if !trimmed.is_empty() && !path.is_empty() {
-                            let name = format!("xml.{}", path.join("."));
-                            cap!(name, trimmed.to_string());
-                        }
-                    }
-                    path.pop();
+                    depth = depth.saturating_sub(1);
                 }
                 Ok(Event::Text(e)) => {
-                    if let (Some(current), Ok(t)) = (text.last_mut(), e.decode()) {
-                        current.push_str(t.as_ref());
+                    if let Ok(t) = e.decode() {
+                        text.push_str(t.as_ref());
                     }
                 }
                 Ok(Event::CData(e)) => {
                     // CDATA is text that is deliberately not markup, and a
                     // classic place to hide a payload.
-                    if let Some(current) = text.last_mut() {
-                        current.push_str(&String::from_utf8_lossy(e.as_ref()));
-                    }
+                    text.push_str(&String::from_utf8_lossy(e.as_ref()));
                 }
                 Ok(Event::GeneralRef(e)) => {
                     let name = e.decode().map(|n| n.into_owned()).unwrap_or_default();
                     match resolve_entity(&name) {
                         Some(resolved) => {
-                            if let Some(current) = text.last_mut() {
-                                current.push_str(&resolved);
-                            }
+                            text.push_str(&resolved);
                         }
                         None => {
                             // A custom entity. Expanding it is how XXE and
@@ -440,15 +451,18 @@ impl RequestData {
             buf.clear();
         }
 
+        if !text.trim().is_empty() {
+            self.xml_text.push(text);
+        }
+
         // Elements left open at end of input mean the document was cut short.
         // quick-xml reports EOF rather than an error for this, so a truncated
         // body would otherwise look like a complete one that simply had less
         // in it.
-        if !path.is_empty() {
+        if depth > 0 {
             let msg = format!(
-                "XML body ended with {} element(s) still open; the document is truncated \
-                 and was only partly inspected",
-                path.len()
+                "XML body ended with {depth} element(s) still open; the document is truncated \
+                 and was only partly inspected"
             );
             self.body_error = Some(msg.clone());
             return Err(msg);
@@ -486,7 +500,7 @@ const MAX_XML_DEPTH: usize = 64;
 
 fn xml_limit_message() -> String {
     format!(
-        "XML body exceeded {MAX_XML_ARGS} extracted values; only part of the \
+        "XML body exceeded {MAX_XML_ARGS} elements and attributes; only part of the \
          body was inspected"
     )
 }
@@ -511,12 +525,6 @@ fn resolve_entity(name: &str) -> Option<String> {
     char::from_u32(code).map(|c| c.to_string())
 }
 
-/// Element and attribute names are ASCII in practice; lossy decoding avoids
-/// rejecting a document over a malformed name when the payload is elsewhere.
-fn decode_name(raw: &[u8]) -> String {
-    String::from_utf8_lossy(raw).to_string()
-}
-
 /// Decode one component of `application/x-www-form-urlencoded` input.
 ///
 /// In that encoding `+` denotes a space -- it is what a browser emits for a
@@ -537,21 +545,6 @@ fn form_decode(component: &str) -> String {
     percent_encoding::percent_decode_str(&plus_decoded)
         .decode_utf8_lossy()
         .into_owned()
-}
-
-/// Record one extracted XML value. Returns `true` once the cap is hit.
-fn push_xml_arg(
-    name: &str,
-    value: String,
-    args: &mut HashMapCollection,
-    count: &mut usize,
-) -> bool {
-    if *count >= MAX_XML_ARGS {
-        return true;
-    }
-    *count += 1;
-    args.add(name.to_string(), value);
-    false
 }
 
 /// Most arguments extracted from a single JSON body.

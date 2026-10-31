@@ -1,9 +1,12 @@
 //! Tests for the XML request body processor.
 //!
 //! XML bodies were not inspected at all: they fell through to the urlencoded
-//! parser, which finds nothing in them, so `ARGS` was empty and rules like
-//! CRS 942100 had nothing to look at — the same gap the JSON processor
-//! closed, and the last one from zentinelproxy/zentinel#340.
+//! parser, which finds nothing in them, so rules like CRS 942100 had nothing
+//! to look at — the same gap the JSON processor closed, and the last one from
+//! zentinelproxy/zentinel#340. The processor fills what ModSecurity's two XML
+//! selectors yield: `XML:/*`, the document's text, and `XML://@*`, every
+//! attribute value. Nothing goes into `ARGS` (ModSecurity leaves it alone for
+//! an XML body), and element or attribute names are never values.
 //!
 //! XML brings hazards JSON does not, and most of this file is about them.
 //! Expanding attacker-supplied entity definitions is the mechanism behind
@@ -28,12 +31,12 @@ fn run(rules: &str, content_type: &str, body: &[u8]) -> bool {
 
 fn contains(body: &[u8], needle: &str) -> bool {
     let rules =
-        format!("SecRuleEngine On\nSecRule ARGS \"@contains {needle}\" \"id:1,phase:2,deny\"");
+        format!("SecRuleEngine On\nSecRule XML:/* \"@contains {needle}\" \"id:1,phase:2,deny\"");
     run(&rules, "application/xml", body)
 }
 
 const SQLI_RULE: &str = "SecRuleEngine On\n\
-     SecRule ARGS \"@detectSQLi\" \"id:942100,phase:2,deny,status:403\"";
+     SecRule XML:/*|XML://@* \"@detectSQLi\" \"id:942100,phase:2,deny,status:403\"";
 
 const BODY_ERROR_RULE: &str = "SecRuleEngine On\n\
      SecRule REQBODY_ERROR \"!@eq 0\" \"id:200002,phase:2,deny,status:400\"";
@@ -109,7 +112,7 @@ fn xml_content_types_are_recognised() {
 fn ctl_can_force_the_xml_processor() {
     let rules = "SecRuleEngine On\n\
          SecAction \"id:1,phase:1,pass,nolog,ctl:requestBodyProcessor=XML\"\n\
-         SecRule ARGS \"@detectSQLi\" \"id:942100,phase:2,deny\"";
+         SecRule XML:/* \"@detectSQLi\" \"id:942100,phase:2,deny\"";
     assert!(run(
         rules,
         "",
@@ -125,28 +128,62 @@ fn reqbody_processor_reports_xml() {
 }
 
 // ---------------------------------------------------------------------------
-// Argument naming
+// What the selectors yield, and what they do not
 // ---------------------------------------------------------------------------
 
 #[test]
-fn elements_are_named_by_their_path() {
+fn xml_is_not_exposed_through_args() {
+    // ModSecurity does not populate ARGS from an XML body.
     let rules = "SecRuleEngine On\n\
-         SecRule ARGS:xml.order.item \"@streq widget\" \"id:1,phase:2,deny\"";
-    assert!(run(
+         SecRule ARGS|ARGS_NAMES \"@contains widget\" \"id:1,phase:2,deny\"";
+    assert!(!run(
         rules,
         "application/xml",
-        br#"<order><item>widget</item></order>"#
+        br#"<order><item widget="7">widget</item></order>"#
     ));
 }
 
 #[test]
-fn attributes_are_named_with_an_at_sign() {
+fn element_and_attribute_names_are_not_values() {
+    // CRS 944100: `java.lang.runtime` in ARGS_NAMES|XML:/*|XML://@* must not
+    // fire on an element or attribute *named* that way (its regression tests
+    // 944100-11/12/15/16), only on text or attribute values.
     let rules = "SecRuleEngine On\n\
-         SecRule ARGS:xml.order.item.@id \"@streq 7\" \"id:1,phase:2,deny\"";
+         SecRule ARGS|ARGS_NAMES|XML:/*|XML://@* \"@rx java\\.lang\\.(?:runtime|processbuilder)\" \
+         \"id:944100,phase:2,deny,t:none,t:lowercase\"";
+    for body in [
+        br#"<?xml version="1.0"?><xml><java.lang.Runtime attribute_name="attribute_value">value</java.lang.Runtime></xml>"#.as_slice(),
+        br#"<?xml version="1.0"?><xml><element java.lang.Runtime="attribute_value">element_value</element></xml>"#,
+    ] {
+        assert!(!run(rules, "application/xml", body), "a name is not a value");
+    }
     assert!(run(
         rules,
         "application/xml",
-        br#"<order><item id="7">widget</item></order>"#
+        br#"<xml><e>java.lang.Runtime</e></xml>"#
+    ));
+    assert!(run(
+        rules,
+        "application/xml",
+        br#"<xml><e a="java.lang.ProcessBuilder"/></xml>"#
+    ));
+}
+
+#[test]
+fn the_document_text_is_one_value_and_attributes_are_each_one() {
+    let rules = "SecRuleEngine On\n\
+         SecRule XML:/* \"@streq widget 3\" \"id:1,phase:2,deny\"";
+    assert!(run(
+        rules,
+        "application/xml",
+        br#"<order><item id="7">widget</item> <qty>3</qty></order>"#
+    ));
+    let rules = "SecRuleEngine On\n\
+         SecRule XML://@* \"@streq 7\" \"id:1,phase:2,deny\"";
+    assert!(run(
+        rules,
+        "application/xml",
+        br#"<order><item id="7" kind="box">widget</item></order>"#
     ));
 }
 

@@ -1,16 +1,11 @@
-//! `XML:` rule targets, resolved against the flattened XML body.
+//! `XML:` rule targets.
 //!
-//! ModSecurity selects XML through XPath. This engine has no XPath evaluator
-//! and flattens XML bodies into `ARGS` instead — which already covers stock
-//! CRS, because 175 of the 176 CRS rules naming an `XML:` target also name
-//! `ARGS` in the same rule. But a rule targeting `XML:` *alone* used to resolve
-//! to nothing and match nothing, with no complaint at load time, and that is
-//! the failure mode this engine should never have.
-//!
-//! The two selectors CRS actually writes — `XML:/*` (177 occurrences) and
-//! `XML://@*` (176) — are exactly the element-text and attribute halves of the
-//! flattening, so they need no XPath engine. Anything richer is reported when
-//! the rules load rather than silently matching nothing.
+//! ModSecurity selects XML through XPath. This engine has no XPath evaluator;
+//! it answers the two selectors CRS actually writes — `XML:/*` (177
+//! occurrences), the document's text, and `XML://@*` (176), every attribute
+//! value — from what the XML body processor collected, as libxml2 would answer
+//! them. Anything richer is reported when the rules load rather than silently
+//! matching nothing. `ARGS` does not see an XML body, as in ModSecurity.
 
 use zentinel_modsec::ModSecurity;
 
@@ -131,7 +126,7 @@ fn an_xml_target_is_empty_when_the_body_is_not_xml() {
 
 #[test]
 fn the_stock_crs_target_list_still_works() {
-    // 175 of 176 CRS rules naming XML: also name ARGS. Both halves must fire.
+    // 175 of 176 CRS rules naming XML: also name ARGS. Both XML halves must fire.
     let rule = "SecRuleEngine On\n\
         SecRule ARGS|ARGS_NAMES|XML:/*|XML://@* \"@detectSQLi\" \"id:942100,phase:2,deny\"";
     assert!(blocks(rule, format!("<o><q>{SQLI}</q></o>").as_bytes()));
