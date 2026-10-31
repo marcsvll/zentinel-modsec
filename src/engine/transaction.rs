@@ -86,8 +86,14 @@ struct MatchedVariable {
 /// Result of evaluating one rule.
 struct RuleOutcome {
     matched: bool,
+    /// The last match's captures (what a following chain link sees as TX:0..9).
     captures: Vec<String>,
-    matched_variable: Option<MatchedVariable>,
+    /// Every variable the operator matched, with that match's captures, in
+    /// order. ModSecurity runs a rule's `capture` and `setvar` once per matched
+    /// variable (CRS 920450 collects one `tx.header_name_920450_<name>` per
+    /// request header; 922150 counts content types), so the transaction replays
+    /// the non-disruptive actions over this list.
+    matches: Vec<(MatchedVariable, Vec<String>)>,
 }
 
 impl RuleOutcome {
@@ -95,7 +101,7 @@ impl RuleOutcome {
         Self {
             matched: false,
             captures: Vec::new(),
-            matched_variable: None,
+            matches: Vec::new(),
         }
     }
 }
@@ -483,22 +489,26 @@ impl Transaction {
             let captures = outcome.captures;
 
             if matched {
-                // `capture`: the operator's match and groups become TX:0..TX:9
-                // for the rest of the transaction, as in ModSecurity, so a
-                // `setvar:tx.x=%{tx.1}` on this rule, or a `TX:1` target in the
-                // next chain link, sees them.
-                if has_capture(rule) {
-                    let full = outcome
-                        .matched_variable
-                        .as_ref()
-                        .and_then(|v| v.portion.clone());
-                    self.store_captures(full, &captures);
-                }
-                // MATCHED_VARS is scoped to the current rule in ModSecurity,
-                // so this replaces rather than appends -- otherwise a later
-                // rule would read the previous rule's matches.
+                // Execute actions
+                let mut action_result = execute_actions(&rule.actions, None, &captures);
+                // The rule's `capture` and `setvar`s run once per matched
+                // variable, in order, with TX:0..9 and MATCHED_VAR set to that
+                // match: `setvar:tx.h_%{tx.0}=1` makes one variable per match.
+                // MATCHED_VARS is scoped to the current rule in ModSecurity, so
+                // it is replaced, not appended to, and ends up holding every
+                // variable this rule matched; MATCHED_VAR is the last one.
+                let setvar_ops = std::mem::take(&mut action_result.setvar_ops);
                 self.matched_vars.clear();
-                if let Some(ref var) = outcome.matched_variable {
+                if outcome.matches.is_empty() {
+                    // A SecAction: no variable, the setvars run once.
+                    for op in &setvar_ops {
+                        self.apply_setvar(op);
+                    }
+                }
+                for (var, caps) in &outcome.matches {
+                    if has_capture(rule) {
+                        self.store_captures(var.portion.clone(), caps);
+                    }
                     self.matched_vars
                         .push((var.name.clone(), var.value.clone()));
                     self.matched_data.push(MatchedData {
@@ -507,12 +517,10 @@ impl Transaction {
                         value: var.value.clone(),
                         matched_portion: var.portion.clone(),
                     });
+                    for op in &setvar_ops {
+                        self.apply_setvar(op);
+                    }
                 }
-            }
-
-            if matched {
-                // Execute actions
-                let action_result = execute_actions(&rule.actions, None, &captures);
 
                 // Track matched rule. A chain is one logical rule identified
                 // by its starter: it is reported only once every link has
@@ -525,14 +533,10 @@ impl Transaction {
 
                 if rule.is_chain {
                     // A link that expects more links after it. Its `setvar`s
-                    // take effect now, as in ModSecurity: CRS writes a value in
-                    // the starter and reads it in the next link. Disruptive,
+                    // took effect above, as in ModSecurity: CRS writes a value
+                    // in the starter and reads it in the next link. Disruptive,
                     // flow and metadata actions wait until the whole chain has
                     // matched, so they are held with the starter's result.
-                    let mut action_result = action_result;
-                    for op in std::mem::take(&mut action_result.setvar_ops) {
-                        self.apply_setvar(&op);
-                    }
                     if !chain_state.in_chain {
                         chain_state.start_chain(idx);
                         pending_chain_actions = Some(action_result);
@@ -555,13 +559,10 @@ impl Transaction {
                         self.matched_rules.push(id.clone());
                     }
                     // The last link's own `setvar`s (CRS puts the anomaly score
-                    // increments there) run now; the starter's held actions
-                    // then take over for the disruptive and flow part.
+                    // increments there) ran above; the starter's held actions
+                    // take over for the disruptive and flow part.
                     let mut last = action_result;
-                    for op in std::mem::take(&mut last.setvar_ops) {
-                        self.apply_setvar(&op);
-                    }
-                    // So do its `ctl` overrides: in ModSecurity a link's
+                    // Its `ctl` overrides run now: in ModSecurity a link's
                     // non-disruptive actions run when the link matches, and
                     // exclusion rules (the CRS plugins, generated overlays)
                     // put `ctl:ruleRemoveById` on the last link, after the
@@ -574,11 +575,6 @@ impl Transaction {
                 } else {
                     action_result
                 };
-
-                // Apply setvar operations
-                for op in &action_result.setvar_ops {
-                    self.apply_setvar(op);
-                }
 
                 // Apply ctl: overrides before the disruptive action below, so
                 // that ctl:ruleEngine=DetectionOnly on the same rule governs
@@ -760,7 +756,7 @@ impl Transaction {
                 return Ok(RuleOutcome {
                     matched,
                     captures: result.captures,
-                    matched_variable: None,
+                    matches: Vec::new(),
                 });
             }
             // Variables were specified but resolved to nothing (e.g. absent
@@ -772,11 +768,7 @@ impl Transaction {
             // 920100 (`REQUEST_LINE "!@rx ..."`) into a rule that denied all
             // traffic. Absence is tested with `&VAR "@eq 0"`, which resolves to
             // a count and so never reaches this branch.
-            return Ok(RuleOutcome {
-                matched: false,
-                captures: Vec::new(),
-                matched_variable: None,
-            });
+            return Ok(RuleOutcome::no_match());
         }
 
         // If the operator argument references runtime macros (e.g.
@@ -801,7 +793,11 @@ impl Transaction {
         // changed it, as ModSecurity does: CRS 942500 (`t:none,t:urlDecodeUni,
         // multiMatch`) catches `/*+optimizer hint */` on the raw value, which
         // urlDecodeUni would turn into `/* optimizer hint */` and lose.
+        // Every variable is tested: ModSecurity does not stop at the first
+        // match, since the rule's `capture` and `setvar` run once per matched
+        // variable (see `RuleOutcome::matches`).
         let multi_match = has_multi_match(rule);
+        let mut matches: Vec<(MatchedVariable, Vec<String>)> = Vec::new();
         for (name, value) in all_values {
             let candidates: Vec<String> = if multi_match {
                 rule.transformations.apply_steps(&value)
@@ -819,7 +815,7 @@ impl Transaction {
 
                 if final_match {
                     let matched = MatchedVariable {
-                        name,
+                        name: name.clone(),
                         // ModSecurity's MATCHED_VAR is the *variable's* value,
                         // not the portion the operator hit. The portion is
                         // reported separately, since an audit log wants both:
@@ -828,16 +824,20 @@ impl Transaction {
                         value: transformed,
                         portion: result.matched_value,
                     };
-                    return Ok(RuleOutcome {
-                        matched: true,
-                        captures: result.captures,
-                        matched_variable: Some(matched),
-                    });
+                    matches.push((matched, result.captures));
+                    break;
                 }
             }
         }
 
-        Ok(RuleOutcome::no_match())
+        match matches.last() {
+            None => Ok(RuleOutcome::no_match()),
+            Some((_, captures)) => Ok(RuleOutcome {
+                matched: true,
+                captures: captures.clone(),
+                matches,
+            }),
+        }
     }
 
     /// Publish a `capture` result as `TX:0` (the whole match) and `TX:1..TX:9`
