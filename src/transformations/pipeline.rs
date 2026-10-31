@@ -66,6 +66,22 @@ impl TransformationPipeline {
         current
     }
 
+    /// The value before any transformation and after each transformation that
+    /// changed it, in order: what `multiMatch` runs the operator against.
+    pub fn apply_steps(&self, input: &str) -> Vec<String> {
+        let mut steps = vec![input.to_string()];
+        let mut current = input.to_string();
+        for t in &self.transformations {
+            if let Cow::Owned(next) = t.transform(&current) {
+                if next != current {
+                    steps.push(next.clone());
+                    current = next;
+                }
+            }
+        }
+        steps
+    }
+
     /// Check if the pipeline is empty.
     pub fn is_empty(&self) -> bool {
         self.transformations.is_empty()

@@ -13,7 +13,7 @@ use crate::actions::{
 };
 use crate::error::Result;
 use crate::operators::{compile_operator, Operator};
-use crate::parser::{Action, DataAction, OperatorSpec};
+use crate::parser::{Action, DataAction, FlowAction, OperatorSpec};
 use crate::variables::{
     Collection, MutableCollection, RequestData, ResponseData, TxCollection, VariableResolver,
 };
@@ -796,32 +796,44 @@ impl Transaction {
             rule.operator.as_ref()
         };
 
-        // Apply transformations and match
+        // Apply transformations and match. With `multiMatch` the operator runs
+        // against the value before any transformation and after each one that
+        // changed it, as ModSecurity does: CRS 942500 (`t:none,t:urlDecodeUni,
+        // multiMatch`) catches `/*+optimizer hint */` on the raw value, which
+        // urlDecodeUni would turn into `/* optimizer hint */` and lose.
+        let multi_match = has_multi_match(rule);
         for (name, value) in all_values {
-            let transformed = rule.transformations.apply(&value);
-            let result = operator.execute(&transformed);
-
-            let final_match = if rule.operator_negated {
-                !result.matched
+            let candidates: Vec<String> = if multi_match {
+                rule.transformations.apply_steps(&value)
             } else {
-                result.matched
+                vec![rule.transformations.apply(&value).into_owned()]
             };
+            for transformed in candidates {
+                let result = operator.execute(&transformed);
 
-            if final_match {
-                let matched = MatchedVariable {
-                    name,
-                    // ModSecurity's MATCHED_VAR is the *variable's* value, not
-                    // the portion the operator hit. The portion is reported
-                    // separately, since an audit log wants both: the value to
-                    // judge the match, the portion to see what triggered it.
-                    value: transformed.into_owned(),
-                    portion: result.matched_value,
+                let final_match = if rule.operator_negated {
+                    !result.matched
+                } else {
+                    result.matched
                 };
-                return Ok(RuleOutcome {
-                    matched: true,
-                    captures: result.captures,
-                    matched_variable: Some(matched),
-                });
+
+                if final_match {
+                    let matched = MatchedVariable {
+                        name,
+                        // ModSecurity's MATCHED_VAR is the *variable's* value,
+                        // not the portion the operator hit. The portion is
+                        // reported separately, since an audit log wants both:
+                        // the value to judge the match, the portion to see what
+                        // triggered it.
+                        value: transformed,
+                        portion: result.matched_value,
+                    };
+                    return Ok(RuleOutcome {
+                        matched: true,
+                        captures: result.captures,
+                        matched_variable: Some(matched),
+                    });
+                }
             }
         }
 
@@ -938,6 +950,12 @@ fn first_value(values: Option<Vec<&str>>) -> String {
 }
 
 /// Whether a rule carries the `capture` action.
+fn has_multi_match(rule: &CompiledRule) -> bool {
+    rule.actions
+        .iter()
+        .any(|a| matches!(a, Action::Flow(FlowAction::MultiMatch)))
+}
+
 fn has_capture(rule: &CompiledRule) -> bool {
     rule.actions
         .iter()
