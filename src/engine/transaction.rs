@@ -197,6 +197,30 @@ impl Transaction {
     /// Process request headers (Phase 1).
     pub fn process_request_headers(&mut self) -> Result<()> {
         self.phase = Phase::RequestHeaders;
+        // ModSecurity picks the body processor from Content-Type when the
+        // headers are in, so REQBODY_PROCESSOR already reads MULTIPART in phase
+        // 1: CRS 920400 chains it with Content-Length to refuse an upload that
+        // is too large before the body arrives. The body parser sets it again
+        // (a ctl:requestBodyProcessor may change it).
+        let content_type: Option<String> = self
+            .request
+            .headers
+            .get("content-type")
+            .and_then(|v| v.first().map(|s| s.to_ascii_lowercase()));
+        if let Some(ct_lower) = content_type {
+            let processor = if ct_lower.starts_with("multipart/form-data") {
+                "MULTIPART"
+            } else if is_xml_content_type(&ct_lower) {
+                "XML"
+            } else if is_json_content_type(&ct_lower) {
+                "JSON"
+            } else if ct_lower.starts_with("application/x-www-form-urlencoded") {
+                "URLENCODED"
+            } else {
+                ""
+            };
+            self.request.body_processor = processor.to_string();
+        }
         self.run_phase(Phase::RequestHeaders)?;
         Ok(())
     }
