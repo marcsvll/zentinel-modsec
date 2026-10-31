@@ -3,6 +3,7 @@
 use super::collection::{Collection, HashMapCollection};
 use super::json::JsonNode;
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 /// Request data container.
 #[derive(Debug, Clone, Default)]
@@ -48,6 +49,15 @@ pub struct RequestData {
     pub body_error: Option<String>,
     /// Request body.
     pub body: Vec<u8>,
+    /// Argument names whose decoded *value* was not valid UTF-8 (`%c0%af`, a
+    /// truncated sequence, a byte above `%f4`). Values are stored as `String`,
+    /// so the invalid bytes themselves are gone (replaced by U+FFFD); this is
+    /// what `@validateUtf8Encoding` over `ARGS` reports, as ModSecurity does on
+    /// the raw bytes (CRS 920250).
+    pub invalid_utf8_args: HashSet<String>,
+    /// Argument names that were themselves not valid UTF-8 once decoded
+    /// (`@validateUtf8Encoding` over `ARGS_NAMES`).
+    pub invalid_utf8_arg_names: HashSet<String>,
     /// The XML body's text, as ModSecurity's `XML:/*` yields it: the content of
     /// the document element, that is every text node (and CDATA section) of the
     /// document in order, as one value. Empty when the body was not XML or had
@@ -148,13 +158,41 @@ impl RequestData {
                 let key = &pair[..pos];
                 let value = &pair[pos + 1..];
                 // URL decode
-                let key = form_decode(key);
-                let value = form_decode(value);
+                let (key, key_ok) = form_decode_checked(key);
+                let (value, value_ok) = form_decode_checked(value);
+                self.note_utf8(&key, key_ok, value_ok);
                 self.args_get.add(key, value);
             } else if !pair.is_empty() {
-                let key = form_decode(pair);
+                let (key, key_ok) = form_decode_checked(pair);
+                self.note_utf8(&key, key_ok, true);
                 self.args_get.add(key, String::new());
             }
+        }
+    }
+
+    /// Records an argument whose name or value did not decode to valid UTF-8.
+    fn note_utf8(&mut self, key: &str, key_ok: bool, value_ok: bool) {
+        if !key_ok {
+            self.invalid_utf8_arg_names.insert(key.to_string());
+        }
+        if !value_ok {
+            self.invalid_utf8_args.insert(key.to_string());
+        }
+    }
+
+    /// Whether the argument a resolved name points at (`ARGS:x`, `ARGS_GET:x`,
+    /// `ARGS_NAMES:x`, ...) did not decode to valid UTF-8.
+    pub fn has_invalid_utf8(&self, resolved_name: &str) -> bool {
+        let Some((collection, key)) = resolved_name.split_once(':') else {
+            return false;
+        };
+        if !collection.starts_with("ARGS") {
+            return false;
+        }
+        if collection.ends_with("_NAMES") {
+            self.invalid_utf8_arg_names.contains(key)
+        } else {
+            self.invalid_utf8_args.contains(key)
         }
     }
 
@@ -246,8 +284,9 @@ impl RequestData {
             if let Some(pos) = pair.find('=') {
                 let key = &pair[..pos];
                 let value = &pair[pos + 1..];
-                let key = form_decode(key);
-                let value = form_decode(value);
+                let (key, key_ok) = form_decode_checked(key);
+                let (value, value_ok) = form_decode_checked(value);
+                self.note_utf8(&key, key_ok, value_ok);
                 self.args_post.add(key, value);
             } else if !pair.is_empty() {
                 // A parameter with no `=` is a name with an empty value, which
@@ -256,7 +295,9 @@ impl RequestData {
                 // literal separator, so the whole body became invisible to
                 // ARGS and ARGS_NAMES while the origin still saw a parameter.
                 // The query-string parser has always handled this shape.
-                self.args_post.add(form_decode(pair), String::new());
+                let (key, key_ok) = form_decode_checked(pair);
+                self.note_utf8(&key, key_ok, true);
+                self.args_post.add(key, String::new());
             }
         }
     }
@@ -525,26 +566,31 @@ fn resolve_entity(name: &str) -> Option<String> {
     char::from_u32(code).map(|c| c.to_string())
 }
 
-/// Decode one component of `application/x-www-form-urlencoded` input.
+/// Decode one component of `application/x-www-form-urlencoded` input, and say
+/// whether the decoded bytes were valid UTF-8.
 ///
 /// In that encoding `+` denotes a space -- it is what a browser emits for a
 /// space in a submitted form -- so decoding only percent-escapes leaves the
 /// argument holding a literal `+` where the origin application will see a
 /// space. Any rule matching a payload that contains whitespace then misses,
 /// which is a bypass rather than a coverage gap: the same request reaches the
-/// application as spaces either way.
+/// application as spaces either way. The `+` substitution happens *before*
+/// percent-decoding, so a plus that was genuinely sent as `%2B` survives as a
+/// plus instead of becoming a space.
 ///
-/// The `+` substitution happens *before* percent-decoding, so a plus that was
-/// genuinely sent as `%2B` survives as a plus instead of becoming a space.
-fn form_decode(component: &str) -> String {
+/// Invalid UTF-8 bytes are replaced (U+FFFD) in the returned string; the flag
+/// is what `@validateUtf8Encoding` reports, since the string cannot carry them.
+fn form_decode_checked(component: &str) -> (String, bool) {
     let plus_decoded: Cow<'_, str> = if component.as_bytes().contains(&b'+') {
         Cow::Owned(component.replace('+', " "))
     } else {
         Cow::Borrowed(component)
     };
-    percent_encoding::percent_decode_str(&plus_decoded)
-        .decode_utf8_lossy()
-        .into_owned()
+    let bytes: Vec<u8> = percent_encoding::percent_decode_str(&plus_decoded).collect();
+    match String::from_utf8(bytes) {
+        Ok(s) => (s, true),
+        Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), false),
+    }
 }
 
 /// Most arguments extracted from a single JSON body.

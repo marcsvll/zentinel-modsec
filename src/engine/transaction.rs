@@ -13,7 +13,7 @@ use crate::actions::{
 };
 use crate::error::Result;
 use crate::operators::{compile_operator, Operator};
-use crate::parser::{Action, DataAction, FlowAction, OperatorSpec};
+use crate::parser::{Action, DataAction, FlowAction, OperatorName, OperatorSpec};
 use crate::variables::{
     Collection, MutableCollection, RequestData, ResponseData, TxCollection, VariableResolver,
 };
@@ -799,8 +799,26 @@ impl Transaction {
         // match, since the rule's `capture` and `setvar` run once per matched
         // variable (see `RuleOutcome::matches`).
         let multi_match = has_multi_match(rule);
+        // Argument values are `String`s, so bytes that were not valid UTF-8 are
+        // already replaced by the time an operator sees them; the request
+        // remembers which arguments had them, and that is what
+        // @validateUtf8Encoding reports (CRS 920250).
+        let utf8_validator = matches!(rule.operator_spec.name, OperatorName::ValidateUtf8Encoding);
         let mut matches: Vec<(MatchedVariable, Vec<String>)> = Vec::new();
         for (name, value) in all_values {
+            if utf8_validator && self.request.has_invalid_utf8(&name) {
+                if !rule.operator_negated {
+                    matches.push((
+                        MatchedVariable {
+                            name: name.clone(),
+                            value: value.clone(),
+                            portion: Some("invalid UTF-8 encoding".to_string()),
+                        },
+                        Vec::new(),
+                    ));
+                }
+                continue;
+            }
             let candidates: Vec<String> = if multi_match {
                 rule.transformations.apply_steps(&value)
             } else {
