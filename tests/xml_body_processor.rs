@@ -170,6 +170,25 @@ fn element_and_attribute_names_are_not_values() {
 }
 
 #[test]
+fn request_body_is_empty_under_the_xml_processor() {
+    // ModSecurity v2 semantics, and what the CRS suite expects (944100-11):
+    // REQUEST_BODY is the URLENCODED processor's; an XML body is reached
+    // through XML:/* and XML://@*.
+    let rules = "SecRuleEngine On\n\
+         SecRule REQUEST_BODY \"@contains java.lang.runtime\" \"id:1,phase:2,deny,t:lowercase\"";
+    assert!(!run(
+        rules,
+        "application/xml",
+        br#"<xml><java.lang.Runtime a="v">value</java.lang.Runtime></xml>"#
+    ));
+    assert!(run(
+        rules,
+        "application/x-www-form-urlencoded",
+        b"q=java.lang.Runtime"
+    ));
+}
+
+#[test]
 fn the_document_text_is_one_value_and_attributes_are_each_one() {
     let rules = "SecRuleEngine On\n\
          SecRule XML:/* \"@streq widget 3\" \"id:1,phase:2,deny\"";

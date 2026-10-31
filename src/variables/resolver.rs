@@ -148,7 +148,18 @@ impl<'a> VariableResolver<'a> {
                 vec![("ARGS_COMBINED_SIZE".to_string(), size.to_string())]
             }
             VariableName::RequestBody => {
-                vec![("REQUEST_BODY".to_string(), self.request.body_str())]
+                // ModSecurity v2 fills REQUEST_BODY only when the URLENCODED
+                // processor handled the body; with the XML processor the body is
+                // reached through XML:/* and XML://@* instead. The CRS regression
+                // suite expects that: 944100-11 sends
+                // `<java.lang.Runtime>value</java.lang.Runtime>` and must not
+                // match `java\.lang\.runtime` over REQUEST_BODY (libmodsecurity
+                // v3 does fill it and fails those tests, CRS nginx-overrides.yaml).
+                if self.request.body_processor == "XML" {
+                    vec![]
+                } else {
+                    vec![("REQUEST_BODY".to_string(), self.request.body_str())]
+                }
             }
             VariableName::RequestBodyLength => {
                 vec![(
