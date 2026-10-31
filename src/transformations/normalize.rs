@@ -222,8 +222,22 @@ impl Transformation for NormalizePath {
                     modified = true;
                 }
                 ".." => {
-                    modified = true;
-                    stack.pop();
+                    // ModSecurity removes a back-reference together with the
+                    // segment before it, "except when at the beginning of the
+                    // input": `../.history` stays as written (CRS 930120 looks
+                    // for `/.history`), and `/../etc` is `/etc`.
+                    match stack.last() {
+                        Some(&"") => {
+                            modified = true;
+                        }
+                        None | Some(&"..") => {
+                            stack.push("..");
+                        }
+                        Some(_) => {
+                            modified = true;
+                            stack.pop();
+                        }
+                    }
                 }
                 "" if !stack.is_empty() => {
                     // Keep leading empty string for absolute paths
@@ -626,6 +640,11 @@ mod tests {
         assert_eq!(t.transform("/a/b/../c"), "/a/c");
         assert_eq!(t.transform("/a//b/./c"), "/a/b/c");
         assert_eq!(t.transform("a\\b\\c"), "a/b/c");
+        // A back-reference at the beginning has nothing to remove and stays.
+        assert_eq!(t.transform("../.history"), "../.history");
+        assert_eq!(t.transform("../../etc/passwd"), "../../etc/passwd");
+        assert_eq!(t.transform("a/../../b"), "../b");
+        assert_eq!(t.transform("/../etc/passwd"), "/etc/passwd");
     }
 
     #[test]
