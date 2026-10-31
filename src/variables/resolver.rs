@@ -215,6 +215,20 @@ impl<'a> VariableResolver<'a> {
                 selection,
             ),
             VariableName::Files => self.resolve_collection(&self.request.files, "FILES", selection),
+            VariableName::FilesSizes => {
+                self.resolve_collection(&self.request.files_sizes, "FILES_SIZES", selection)
+            }
+            VariableName::FilesCombinedSize => {
+                use super::collection::Collection;
+                let total: u64 = self
+                    .request
+                    .files_sizes
+                    .all()
+                    .into_iter()
+                    .filter_map(|(_, v)| v.parse::<u64>().ok())
+                    .sum();
+                vec![("FILES_COMBINED_SIZE".to_string(), total.to_string())]
+            }
             VariableName::FilesNames => {
                 self.resolve_collection_names(&[&self.request.files], "FILES_NAMES", selection)
             }

@@ -35,6 +35,9 @@ pub struct RequestData {
     /// Uploaded files (key = part name, value = client-supplied filename),
     /// populated by the multipart body processor. Backs `FILES`/`FILES_NAMES`.
     pub files: HashMapCollection,
+    /// Size in bytes of each uploaded file's content (key = part name), as a
+    /// decimal string. Backs `FILES_SIZES` and `FILES_COMBINED_SIZE`.
+    pub files_sizes: HashMapCollection,
     /// Name of the body processor that handled the request body
     /// (`MULTIPART`, `URLENCODED`, `JSON`, or empty when none ran). Backs
     /// `REQBODY_PROCESSOR`.
@@ -267,6 +270,8 @@ impl RequestData {
                 self.multipart_part_headers.add(name.clone(), line);
             }
             if let Some(fname) = filename {
+                self.files_sizes
+                    .add(name.clone(), content.len().to_string());
                 self.files.add(name, fname);
             } else {
                 self.args_post.add(name, content.to_string());
