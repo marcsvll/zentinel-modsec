@@ -68,21 +68,22 @@ fn three_link_chain_requires_all_three() {
 }
 
 #[test]
-fn setvar_on_the_starter_only_applies_when_the_chain_completes() {
-    // The starter sets an anomaly score; a later rule denies on that score.
-    // A partial chain match must leave the score untouched.
+fn setvar_on_the_starter_is_visible_to_the_next_link() {
+    // ModSecurity runs a link's non-disruptive actions when that link matches, so the
+    // next link can read what the starter set: CRS 920450 sets
+    // `tx.header_name_920450` on the starter and reads `TX:/^HEADER_NAME_920450/` in
+    // the second link. The disruptive action still waits for the whole chain.
     let rules = "SecRuleEngine On\n\
-         SecRule REQUEST_URI \"@contains admin\" \"id:1,phase:1,pass,nolog,setvar:tx.score=5,chain\"\n\
-         SecRule REQUEST_METHOD \"@streq GET\"\n\
-         SecRule TX:score \"@ge 5\" \"id:2,phase:1,deny\"";
+         SecRule REQUEST_URI \"@contains admin\" \"id:1,phase:1,deny,nolog,setvar:tx.flag=1,chain\"\n\
+         SecRule TX:flag \"@eq 1\"";
 
     assert!(
         blocked(rules, "/admin", "GET"),
-        "complete chain should set the score"
+        "the second link must see the starter's setvar"
     );
     assert!(
-        !blocked(rules, "/admin", "POST"),
-        "partial chain match must not apply the starter's setvar"
+        !blocked(rules, "/home", "GET"),
+        "a starter that does not match sets nothing"
     );
 }
 
