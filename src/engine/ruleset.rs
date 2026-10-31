@@ -32,6 +32,8 @@ pub struct CompiledRule {
     pub transformations: TransformationPipeline,
     /// Actions to execute on match.
     pub actions: Vec<Action>,
+    /// The rule's `tag:` values, for `ctl:ruleRemoveTargetByTag`.
+    pub tags: Vec<String>,
     /// Whether this rule is part of a chain.
     pub is_chain: bool,
     /// Index of next rule in chain (if any).
@@ -224,6 +226,14 @@ impl CompiledRuleset {
                     let (operator, operator_negated) =
                         compile_operator_reporting(&rule.operator, &id)?;
 
+                    let tags = rule
+                        .actions
+                        .iter()
+                        .filter_map(|a| match a {
+                            Action::Metadata(MetadataAction::Tag(t)) => Some(t.clone()),
+                            _ => None,
+                        })
+                        .collect();
                     let compiled = CompiledRule {
                         id,
                         phase,
@@ -233,6 +243,7 @@ impl CompiledRuleset {
                         operator_spec,
                         transformations,
                         actions: rule.actions,
+                        tags,
                         is_chain,
                         chain_next: None,
                     };
@@ -282,6 +293,7 @@ impl CompiledRuleset {
                         operator_spec,
                         transformations,
                         actions: sec_action.actions,
+                        tags: Vec::new(),
                         is_chain: false,
                         chain_next: None,
                     };

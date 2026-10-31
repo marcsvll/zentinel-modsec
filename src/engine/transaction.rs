@@ -709,7 +709,9 @@ impl Transaction {
         // this transaction. The check is hoisted so rules with no exclusion --
         // effectively all of them -- pay one comparison rather than a scan per
         // variable.
-        let filter_targets = self.controls.has_target_removals(rule.id.as_deref());
+        let filter_targets = self
+            .controls
+            .has_target_removals(rule.id.as_deref(), &rule.tags);
 
         let mut all_values = Vec::new();
         let mut any_excluded = false;
@@ -720,7 +722,7 @@ impl Transaction {
                 resolved.retain(|(name, _)| {
                     !self
                         .controls
-                        .is_target_removed(rule.id.as_deref(), spec, name)
+                        .is_target_removed(rule.id.as_deref(), &rule.tags, spec, name)
                 });
                 any_excluded |= resolved.len() != before;
             }

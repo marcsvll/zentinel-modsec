@@ -61,6 +61,15 @@ pub enum CtlDirective {
         /// Target to drop from that rule, e.g. `ARGS:token`.
         target: String,
     },
+    /// `ctl:ruleRemoveTargetByTag=TAG;TARGET`: the target is dropped from every
+    /// rule carrying the tag (CRS 941xxx drops `REQUEST_FILENAME` from the
+    /// `xss-perf-disable` rules this way).
+    RuleRemoveTargetByTag {
+        /// Tag of the rules the exclusion applies to.
+        tag: String,
+        /// Target to drop from those rules.
+        target: String,
+    },
     /// `ctl:requestBodyAccess=On|Off`
     RequestBodyAccess(bool),
     /// `ctl:requestBodyProcessor=URLENCODED|MULTIPART|JSON|XML`
@@ -124,6 +133,20 @@ impl CtlDirective {
                     directive,
                     value,
                     "ruleRemoveTargetById expects ID;TARGET, for example 942100;ARGS:token",
+                ),
+            },
+
+            "ruleremovetargetbytag" => match value.split_once(';') {
+                Some((tag, target)) if !tag.trim().is_empty() && !target.trim().is_empty() => {
+                    CtlDirective::RuleRemoveTargetByTag {
+                        tag: tag.trim().to_string(),
+                        target: target.trim().to_string(),
+                    }
+                }
+                _ => CtlDirective::unsupported(
+                    directive,
+                    value,
+                    "ruleRemoveTargetByTag expects TAG;TARGET, for example attack-xss;REQUEST_FILENAME",
                 ),
             },
 
@@ -211,6 +234,8 @@ pub struct TransactionControls {
     /// resolved value: a rule over a large collection would otherwise re-parse
     /// the same string thousands of times.
     removed_targets: Vec<(String, VariableSpec)>,
+    /// `(tag, parsed target)` pairs from `ctl:ruleRemoveTargetByTag`.
+    removed_targets_by_tag: Vec<(String, VariableSpec)>,
     request_body_access: Option<bool>,
     request_body_processor: Option<String>,
     /// Unsupported directives already reported, so a rule that fires on every
@@ -241,6 +266,21 @@ impl TransactionControls {
                                 rule_id = %rule_id,
                                 target = %target,
                                 "ignoring ctl:ruleRemoveTargetById with an unparseable target"
+                            );
+                        }
+                    }
+                }
+            }
+            CtlDirective::RuleRemoveTargetByTag { tag, target } => {
+                match crate::parser::parse_single_variable(&target) {
+                    Ok(spec) => self.removed_targets_by_tag.push((tag, spec)),
+                    Err(_) => {
+                        let key = format!("ruleRemoveTargetByTag={tag};{target}");
+                        if self.reported.insert(key) {
+                            tracing::warn!(
+                                tag = %tag,
+                                target = %target,
+                                "ignoring ctl:ruleRemoveTargetByTag with an unparseable target"
                             );
                         }
                     }
@@ -289,11 +329,16 @@ impl TransactionControls {
     /// Checked before the per-variable filter so the common case -- no
     /// exclusions at all -- costs one comparison rather than a scan per
     /// variable.
-    pub fn has_target_removals(&self, rule_id: Option<&str>) -> bool {
-        match rule_id {
+    pub fn has_target_removals(&self, rule_id: Option<&str>, tags: &[String]) -> bool {
+        let by_id = match rule_id {
             Some(id) => self.removed_targets.iter().any(|(r, _)| r == id),
             None => false,
-        }
+        };
+        by_id
+            || self
+                .removed_targets_by_tag
+                .iter()
+                .any(|(t, _)| tags.contains(t))
     }
 
     /// Whether one resolved value was excluded from this rule by
@@ -317,15 +362,19 @@ impl TransactionControls {
     pub fn is_target_removed(
         &self,
         rule_id: Option<&str>,
+        tags: &[String],
         var: &VariableSpec,
         resolved_name: &str,
     ) -> bool {
-        let Some(id) = rule_id else {
-            return false;
-        };
-        self.removed_targets
-            .iter()
-            .any(|(r, target)| r == id && target_matches_resolved(var, target, resolved_name))
+        let by_id = rule_id.is_some_and(|id| {
+            self.removed_targets
+                .iter()
+                .any(|(r, target)| r == id && target_matches_resolved(var, target, resolved_name))
+        });
+        by_id
+            || self.removed_targets_by_tag.iter().any(|(t, target)| {
+                tags.contains(t) && target_matches_resolved(var, target, resolved_name)
+            })
     }
 
     /// Whether the request body should be parsed at all.
@@ -553,15 +602,15 @@ mod tests {
         )));
 
         let var = crate::parser::parse_single_variable("REQUEST_HEADERS:User-Agent").unwrap();
-        assert!(controls.is_target_removed(Some("1"), &var, "REQUEST_HEADERS:User-Agent"));
+        assert!(controls.is_target_removed(Some("1"), &[], &var, "REQUEST_HEADERS:User-Agent"));
         // Same target, different rule.
-        assert!(!controls.is_target_removed(Some("2"), &var, "REQUEST_HEADERS:User-Agent"));
+        assert!(!controls.is_target_removed(Some("2"), &[], &var, "REQUEST_HEADERS:User-Agent"));
 
         let other = crate::parser::parse_single_variable("REQUEST_HEADERS:Referer").unwrap();
-        assert!(!controls.is_target_removed(Some("1"), &other, "REQUEST_HEADERS:Referer"));
+        assert!(!controls.is_target_removed(Some("1"), &[], &other, "REQUEST_HEADERS:Referer"));
 
         // Header keys are case insensitive.
-        assert!(controls.is_target_removed(Some("1"), &var, "REQUEST_HEADERS:user-agent"));
+        assert!(controls.is_target_removed(Some("1"), &[], &var, "REQUEST_HEADERS:user-agent"));
     }
 
     /// The shape CRS actually uses: the rule targets a whole collection and
@@ -577,8 +626,8 @@ mod tests {
         )));
 
         let whole_args = crate::parser::parse_single_variable("ARGS").unwrap();
-        assert!(controls.is_target_removed(Some("942100"), &whole_args, "ARGS:json.token"));
-        assert!(!controls.is_target_removed(Some("942100"), &whole_args, "ARGS:json.query"));
+        assert!(controls.is_target_removed(Some("942100"), &[], &whole_args, "ARGS:json.token"));
+        assert!(!controls.is_target_removed(Some("942100"), &[], &whole_args, "ARGS:json.query"));
     }
 
     /// Argument names are case sensitive in ModSecurity, unlike header names.
@@ -592,8 +641,8 @@ mod tests {
         )));
 
         let args = crate::parser::parse_single_variable("ARGS").unwrap();
-        assert!(controls.is_target_removed(Some("1"), &args, "ARGS:Token"));
-        assert!(!controls.is_target_removed(Some("1"), &args, "ARGS:token"));
+        assert!(controls.is_target_removed(Some("1"), &[], &args, "ARGS:Token"));
+        assert!(!controls.is_target_removed(Some("1"), &[], &args, "ARGS:token"));
     }
 
     /// A keyed target cannot select a scalar variable, which has no members.
@@ -606,7 +655,7 @@ mod tests {
         )));
 
         let uri = crate::parser::parse_single_variable("REQUEST_URI").unwrap();
-        assert!(!controls.is_target_removed(Some("1"), &uri, "REQUEST_URI"));
+        assert!(!controls.is_target_removed(Some("1"), &[], &uri, "REQUEST_URI"));
     }
 
     #[test]
@@ -617,15 +666,15 @@ mod tests {
         // Naming the collection with no key excludes every member of it, for
         // a rule targeting the collection or any single member.
         let whole = crate::parser::parse_single_variable("ARGS").unwrap();
-        assert!(controls.is_target_removed(Some("1"), &whole, "ARGS:token"));
-        assert!(controls.is_target_removed(Some("1"), &whole, "ARGS:anything"));
+        assert!(controls.is_target_removed(Some("1"), &[], &whole, "ARGS:token"));
+        assert!(controls.is_target_removed(Some("1"), &[], &whole, "ARGS:anything"));
 
         let keyed = crate::parser::parse_single_variable("ARGS:token").unwrap();
-        assert!(controls.is_target_removed(Some("1"), &keyed, "ARGS:token"));
+        assert!(controls.is_target_removed(Some("1"), &[], &keyed, "ARGS:token"));
 
         // A different collection is untouched.
         let cookies = crate::parser::parse_single_variable("REQUEST_COOKIES").unwrap();
-        assert!(!controls.is_target_removed(Some("1"), &cookies, "REQUEST_COOKIES:token"));
+        assert!(!controls.is_target_removed(Some("1"), &[], &cookies, "REQUEST_COOKIES:token"));
     }
 
     #[test]
