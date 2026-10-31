@@ -8,6 +8,15 @@ pub struct UrlDecode;
 
 impl Transformation for UrlDecode {
     fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        // `+` is an encoded space in a query string, and ModSecurity decodes
+        // it here too (CRS 932200 reads the space back through MATCHED_VARS).
+        if input.contains('+') {
+            let spaced = input.replace('+', " ");
+            return match percent_encoding::percent_decode_str(&spaced).decode_utf8() {
+                Ok(decoded) => Cow::Owned(decoded.into_owned()),
+                Err(_) => Cow::Owned(spaced),
+            };
+        }
         match percent_encoding::percent_decode_str(input).decode_utf8() {
             Ok(decoded) => {
                 if decoded == input {
@@ -72,6 +81,10 @@ impl Transformation for UrlDecodeUni {
                         result.push_str(&hex);
                     }
                 }
+            } else if c == '+' {
+                // An encoded space, as for urlDecode.
+                result.push(' ');
+                modified = true;
             } else {
                 result.push(c);
             }
@@ -320,6 +333,27 @@ mod tests {
         let t = UrlDecode;
         assert_eq!(t.transform("hello%20world"), "hello world");
         assert_eq!(t.transform("test%2Fpath"), "test/path");
+    }
+
+    #[test]
+    fn plus_is_a_space_in_both_url_decoders() {
+        // ModSecurity's urlDecode and urlDecodeUni both turn `+` into a space;
+        // an encoded plus (`%2B`) stays a plus.
+        for t in [&UrlDecode as &dyn Transformation, &UrlDecodeUni] {
+            assert_eq!(t.transform("a+b"), "a b", "{}", t.name());
+            assert_eq!(t.transform("a%2Bb"), "a+b", "{}", t.name());
+            assert_eq!(
+                t.transform("c%24%40at%2B%2Fet"),
+                "c$@at+/et",
+                "{}",
+                t.name()
+            );
+            // Applied to an already decoded argument (what CRS does with
+            // t:urlDecodeUni on ARGS), the plus becomes the space the rule
+            // looks for.
+            assert_eq!(t.transform("c$@at+/et$@c"), "c$@at /et$@c", "{}", t.name());
+        }
+        assert_eq!(UrlDecodeUni.transform("%u0041+b"), "A b");
     }
 
     #[test]
