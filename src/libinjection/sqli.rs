@@ -433,13 +433,18 @@ pub fn detect_sqli(input: &str) -> DetectionResult {
     // Generate fingerprint
     let fingerprint = generate_fingerprint(&tokens);
 
-    // Check against known fingerprints
-    for len in [2, 3, 4, 5].iter() {
-        if fingerprint.len() >= *len {
-            for i in 0..=fingerprint.len() - len {
-                let substr: String = fingerprint.chars().skip(i).take(*len).collect();
-                if SQLI_FINGERPRINTS.contains(substr.as_str()) {
-                    return DetectionResult::detected(substr);
+    // Check against known fingerprints. The fingerprint is ASCII (one char per
+    // token), so byte windows are char windows; `chars().skip(i)` here was
+    // quadratic in the token count (a 128 KiB value of unknown tokens took
+    // tens of seconds).
+    let fp_bytes = fingerprint.as_bytes();
+    for len in [2usize, 3, 4, 5] {
+        if fp_bytes.len() >= len {
+            for window in fp_bytes.windows(len) {
+                if let Ok(substr) = std::str::from_utf8(window) {
+                    if SQLI_FINGERPRINTS.contains(substr) {
+                        return DetectionResult::detected(substr.to_string());
+                    }
                 }
             }
         }
@@ -788,5 +793,21 @@ mod tests {
     fn test_fingerprint() {
         let fp = sqli_fingerprint("1' OR '1'='1");
         assert!(fp.is_some());
+    }
+
+    #[test]
+    fn long_unknown_token_input_finishes_quickly() {
+        // One token per byte, no fingerprint match: the window scan must stay linear.
+        let mut input = String::from(";");
+        for _ in 0..131_072 {
+            input.push_str("a-");
+        }
+        let start = std::time::Instant::now();
+        let _ = detect_sqli(&input);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "took {:?}",
+            start.elapsed()
+        );
     }
 }
