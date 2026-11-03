@@ -114,7 +114,18 @@ impl Parser {
     }
 
     /// Parse files matching a glob pattern.
+    ///
+    /// `**` is refused: `glob` would walk every directory below the pattern's root
+    /// (`Include /**/x.conf` scans the whole filesystem, which took minutes under
+    /// fuzzing), and ModSecurity's `Include` has no recursive match either (apr_fnmatch
+    /// treats `**` as `*`).
     pub fn parse_glob(&mut self, pattern: &str) -> Result<()> {
+        if pattern.contains("**") {
+            return Err(Error::parse(
+                "recursive glob (**) is not supported by Include".to_string(),
+                pattern,
+            ));
+        }
         let paths = glob::glob(pattern)
             .map_err(|e| Error::parse(format!("invalid glob pattern: {}", e), pattern))?;
 
@@ -682,5 +693,15 @@ mod tests {
             "normalisePath must be recognized: {:?}",
             rs.err()
         );
+    }
+    #[test]
+    fn include_refuses_recursive_globs() {
+        // Found by fuzzing: `Include //////**///x` walked the whole filesystem.
+        let start = std::time::Instant::now();
+        let err = Parser::new()
+            .parse("Include \"/**/nothing-here.conf\"\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("recursive glob"), "{err}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
     }
 }
