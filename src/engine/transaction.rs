@@ -444,6 +444,7 @@ impl Transaction {
         // A chain is one logical rule: the starter's actions fire only when
         // every link matches, so they are held here until the chain completes.
         let mut pending_chain_actions: Option<ActionResult> = None;
+        let mut chain_counted = false;
         let mut skip_count: u32 = 0;
         let mut skip_after: Option<String> = None;
 
@@ -507,6 +508,19 @@ impl Transaction {
                 }
             }
 
+            // Count mode (ctl:ruleCountById, a neblina extension): the rule is
+            // evaluated and its matches reported, but no action of it runs. A
+            // chain is counted as a whole when its starter is.
+            let counted = if chain_state.in_chain {
+                chain_counted
+            } else {
+                self.controls
+                    .is_rule_counted(rule.id.as_deref(), &rule.tags)
+            };
+            if rule.is_chain && !chain_state.in_chain {
+                chain_counted = counted;
+            }
+
             // Evaluate rule
             let outcome = self.evaluate_rule(rule)?;
             let matched = outcome.matched;
@@ -515,6 +529,13 @@ impl Transaction {
             if matched {
                 // Execute actions
                 let mut action_result = execute_actions(&rule.actions, None, &captures);
+                if counted {
+                    // Report the match, run nothing else.
+                    action_result.setvar_ops.clear();
+                    action_result.control_ops.clear();
+                    action_result.disruptive = None;
+                    action_result.flow = FlowOutcome::Continue;
+                }
                 // The rule's `capture` and `setvar`s run once per matched
                 // variable, in order, with TX:0..9 and MATCHED_VAR set to that
                 // match: `setvar:tx.h_%{tx.0}=1` makes one variable per match.

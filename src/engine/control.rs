@@ -54,6 +54,14 @@ pub enum CtlDirective {
     RuleEngine(RuleEngineMode),
     /// `ctl:ruleRemoveById=ID` or `=START-END`, or several separated by commas.
     RuleRemoveById(Vec<RuleIdRange>),
+    /// `ctl:ruleCountById=ID` or `=START-END`, or several separated by commas
+    /// (neblina extension): the rules are evaluated and reported but none of
+    /// their actions run, so they add nothing to the anomaly score and never
+    /// block. How a managed rule is put in "count" mode without editing it.
+    RuleCountById(Vec<RuleIdRange>),
+    /// `ctl:ruleCountByTag=TAG` (neblina extension): count mode for every rule
+    /// carrying the tag.
+    RuleCountByTag(String),
     /// `ctl:ruleRemoveTargetById=ID;TARGET`
     RuleRemoveTargetById {
         /// ID of the rule the exclusion applies to.
@@ -110,6 +118,17 @@ impl CtlDirective {
                     "ruleEngine accepts only On, Off or DetectionOnly",
                 ),
             },
+
+            "rulecountbyid" => match parse_id_ranges(value) {
+                Some(ranges) if !ranges.is_empty() => CtlDirective::RuleCountById(ranges),
+                _ => CtlDirective::unsupported(
+                    directive,
+                    value,
+                    "ruleCountById expects a rule ID or an ID range such as 942100-942999",
+                ),
+            },
+
+            "rulecountbytag" if !value.is_empty() => CtlDirective::RuleCountByTag(value.to_string()),
 
             "ruleremovebyid" => match parse_id_ranges(value) {
                 Some(ranges) if !ranges.is_empty() => CtlDirective::RuleRemoveById(ranges),
@@ -228,6 +247,9 @@ fn parse_id_ranges(value: &str) -> Option<Vec<RuleIdRange>> {
 pub struct TransactionControls {
     engine_mode: Option<RuleEngineMode>,
     removed_rules: Vec<RuleIdRange>,
+    /// Rules in count mode (`ctl:ruleCountById`), by id range and by tag.
+    counted_rules: Vec<RuleIdRange>,
+    counted_tags: Vec<String>,
     /// `(rule id, parsed target)` pairs from `ctl:ruleRemoveTargetById`.
     ///
     /// The target is parsed once when the directive fires rather than once per
@@ -253,6 +275,8 @@ impl TransactionControls {
         match directive {
             CtlDirective::RuleEngine(mode) => self.engine_mode = Some(mode),
             CtlDirective::RuleRemoveById(mut ranges) => self.removed_rules.append(&mut ranges),
+            CtlDirective::RuleCountById(mut ranges) => self.counted_rules.append(&mut ranges),
+            CtlDirective::RuleCountByTag(tag) => self.counted_tags.push(tag),
             CtlDirective::RuleRemoveTargetById { rule_id, target } => {
                 // Parse with the same parser used for rule variables so
                 // collection names round-trip: SecLang writes REQUEST_HEADERS
@@ -322,6 +346,16 @@ impl TransactionControls {
             return false;
         };
         self.removed_rules.iter().any(|r| r.contains(id))
+    }
+
+    /// Whether `ctl:ruleCountById` or `ctl:ruleCountByTag` put this rule in
+    /// count mode: evaluated and reported, actions skipped.
+    pub fn is_rule_counted(&self, rule_id: Option<&str>, tags: &[String]) -> bool {
+        if self.counted_rules.is_empty() && self.counted_tags.is_empty() {
+            return false;
+        }
+        let by_id = rule_id.is_some_and(|id| self.counted_rules.iter().any(|r| r.contains(id)));
+        by_id || self.counted_tags.iter().any(|t| tags.contains(t))
     }
 
     /// Whether any target exclusion applies to this rule.
