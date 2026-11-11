@@ -5,6 +5,67 @@ use super::json::JsonNode;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
+/// What the multipart body processor noticed, as ModSecurity reports it in the
+/// `MULTIPART_*` variables (`modsecurity.conf-recommended`, rule 200003). Every flag is
+/// about the framing, never about the content of a part.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MultipartFlags {
+    /// `MULTIPART_BOUNDARY_QUOTED`: the boundary parameter was quoted.
+    pub boundary_quoted: bool,
+    /// `MULTIPART_BOUNDARY_WHITESPACE`: whitespace around the boundary value.
+    pub boundary_whitespace: bool,
+    /// `MULTIPART_DATA_BEFORE`: bytes before the first delimiter.
+    pub data_before: bool,
+    /// `MULTIPART_DATA_AFTER`: bytes after the closing delimiter.
+    pub data_after: bool,
+    /// `MULTIPART_HEADER_FOLDING`: a part header continued on the next line.
+    pub header_folding: bool,
+    /// `MULTIPART_LF_LINE`: a framing line (delimiter, part header, the blank line
+    /// after the headers, the line break before a delimiter) ended with LF alone.
+    pub lf_line: bool,
+    /// `MULTIPART_MISSING_SEMICOLON`.
+    pub missing_semicolon: bool,
+    /// `MULTIPART_INVALID_QUOTING`.
+    pub invalid_quoting: bool,
+    /// `MULTIPART_INVALID_PART`: a part the processor could not use (no name).
+    pub invalid_part: bool,
+    /// `MULTIPART_INVALID_HEADER_FOLDING`: a continuation line with no header before it.
+    pub invalid_header_folding: bool,
+    /// `MULTIPART_FILE_LIMIT_EXCEEDED`.
+    pub file_limit_exceeded: bool,
+    /// The Content-Type named no usable boundary.
+    pub missing_boundary: bool,
+    /// `MULTIPART_UNMATCHED_BOUNDARY` as libmodsecurity 3 reports it: 2 once the closing
+    /// delimiter was seen, 1 when a line looked like a delimiter (`--...`) but was not
+    /// ours and the body never closed, 0 otherwise.
+    pub unmatched_boundary: u8,
+}
+
+impl MultipartFlags {
+    /// `MULTIPART_STRICT_ERROR`: any of the strict checks failed.
+    pub fn strict_error(&self) -> bool {
+        self.boundary_quoted
+            || self.boundary_whitespace
+            || self.data_before
+            || self.data_after
+            || self.header_folding
+            || self.lf_line
+            || self.missing_semicolon
+            || self.invalid_quoting
+            || self.invalid_part
+            || self.invalid_header_folding
+            || self.file_limit_exceeded
+            || self.missing_boundary
+    }
+}
+
+/// One part of a multipart body while it is being read.
+#[derive(Default)]
+struct MultipartPart {
+    headers: Vec<String>,
+    content: String,
+}
+
 /// Request data container.
 #[derive(Debug, Clone, Default)]
 pub struct RequestData {
@@ -38,6 +99,9 @@ pub struct RequestData {
     /// Size in bytes of each uploaded file's content (key = part name), as a
     /// decimal string. Backs `FILES_SIZES` and `FILES_COMBINED_SIZE`.
     pub files_sizes: HashMapCollection,
+    /// What the multipart processor noticed about the body's framing: ModSecurity's
+    /// `MULTIPART_*` variables.
+    pub multipart: MultipartFlags,
     /// Name of the body processor that handled the request body
     /// (`MULTIPART`, `URLENCODED`, `JSON`, or empty when none ran). Backs
     /// `REQBODY_PROCESSOR`.
@@ -203,55 +267,122 @@ impl RequestData {
     ///
     /// Populates `args_post` from form fields, `files` from file parts, and
     /// `multipart_part_headers` with every part header line keyed by the part
-    /// name (ModSecurity `MULTIPART_PART_HEADERS` semantics). Returns `false`
-    /// when no boundary parameter can be extracted from the Content-Type.
+    /// name (ModSecurity `MULTIPART_PART_HEADERS` semantics), and records what the
+    /// framing looked like in `multipart` (ModSecurity's `MULTIPART_*` flags).
+    ///
+    /// The body is read line by line, as libmodsecurity does: a delimiter
+    /// (`--boundary`, or `--boundary--` to close) counts only as a whole line, so
+    /// the boundary text inside a value is content; a part's headers end at the
+    /// first blank line, whatever its line ending. A body whose closing
+    /// delimiter never comes is a body error (`REQBODY_ERROR`), and the parts read
+    /// until then are still inspected. Returns `false` when no boundary parameter
+    /// can be extracted from the Content-Type.
     pub fn parse_multipart_body(&mut self, content_type: &str) -> bool {
-        let Some(boundary) = extract_multipart_boundary(content_type) else {
+        self.body_processor = "MULTIPART".to_string();
+        let Some((boundary, quoted, whitespace)) = extract_multipart_boundary(content_type) else {
             return false;
         };
+        self.multipart.boundary_quoted = quoted;
+        self.multipart.boundary_whitespace = whitespace;
         let body = self.body_str();
         let delimiter = format!("--{boundary}");
+        let closing = format!("--{boundary}--");
 
-        let mut sections = body.split(delimiter.as_str());
-        // Everything before the first boundary is preamble; discard it.
-        let _preamble = sections.next();
-
-        for section in sections {
-            if section.starts_with("--") {
-                // Closing delimiter (`--boundary--`); anything after is epilogue.
+        #[derive(PartialEq)]
+        enum State {
+            Preamble,
+            Headers,
+            Content,
+            Epilogue,
+        }
+        let mut state = State::Preamble;
+        let mut parts: Vec<MultipartPart> = Vec::new();
+        let mut current = MultipartPart::default();
+        // The line break before a delimiter belongs to the delimiter; it is held back
+        // until the next line shows whether it ends the content.
+        let mut pending_break = "";
+        let mut closed = false;
+        let mut lookalike = false;
+        let mut rest = body.as_str();
+        while !rest.is_empty() {
+            let (line, ending, next) = match rest.find('\n') {
+                Some(i) => {
+                    let raw = &rest[..=i];
+                    match raw.strip_suffix("\r\n") {
+                        Some(l) => (l, "\r\n", &rest[i + 1..]),
+                        None => (&raw[..raw.len() - 1], "\n", &rest[i + 1..]),
+                    }
+                }
+                None => (rest, "", ""),
+            };
+            rest = next;
+            if state == State::Epilogue {
+                self.multipart.data_after = true;
                 break;
             }
-            // The boundary line ends with CRLF before the part headers.
-            let section = section
-                .strip_prefix("\r\n")
-                .or_else(|| section.strip_prefix("\n"))
-                .unwrap_or(section);
+            let framing = line.trim_end_matches([' ', '\t']);
+            let is_closing = framing == closing;
+            let is_delimiter = is_closing || framing == delimiter;
+            if is_delimiter {
+                if pending_break == "\n" || ending == "\n" {
+                    self.multipart.lf_line = true;
+                }
+                pending_break = "";
+                match state {
+                    State::Preamble => {}
+                    State::Headers | State::Content => parts.push(std::mem::take(&mut current)),
+                    State::Epilogue => unreachable!("handled above"),
+                }
+                if is_closing {
+                    closed = true;
+                    state = State::Epilogue;
+                    // Anything at all after the closing line is epilogue data.
+                    if !rest.is_empty() {
+                        self.multipart.data_after = true;
+                    }
+                    break;
+                }
+                state = State::Headers;
+                continue;
+            }
+            if line.starts_with("--") {
+                lookalike = true;
+            }
+            match state {
+                State::Preamble => self.multipart.data_before = true,
+                State::Headers => {
+                    if ending == "\n" {
+                        self.multipart.lf_line = true;
+                    }
+                    if line.is_empty() {
+                        state = State::Content;
+                    } else {
+                        current.headers.push(line.to_string());
+                    }
+                }
+                State::Content => {
+                    current.content.push_str(pending_break);
+                    current.content.push_str(line);
+                    pending_break = ending;
+                }
+                State::Epilogue => unreachable!("handled above"),
+            }
+        }
+        if !closed {
+            // The parts read so far are inspected anyway; the error is what blocks.
+            if state != State::Preamble {
+                parts.push(current);
+            }
+            self.body_error = Some("Multipart: final boundary missing".to_string());
+            self.multipart.unmatched_boundary = u8::from(lookalike);
+        } else {
+            self.multipart.unmatched_boundary = 2;
+        }
 
-            // Headers are separated from the part content by a blank line.
-            let (head, content) = match section.split_once("\r\n\r\n") {
-                Some(split) => split,
-                None => match section.split_once("\n\n") {
-                    Some(split) => split,
-                    None => (section, ""),
-                },
-            };
-            // The CRLF before the next boundary belongs to the framing, not
-            // the content.
-            let content = content
-                .strip_suffix("\r\n")
-                .or_else(|| content.strip_suffix("\n"))
-                .unwrap_or(content);
-
+        for part in parts {
             let mut part_name: Option<String> = None;
             let mut filename: Option<String> = None;
-            let mut header_lines: Vec<String> = Vec::new();
-
-            for line in head.lines() {
-                let line = line.trim_end_matches('\r');
-                if line.is_empty() {
-                    continue;
-                }
-                header_lines.push(line.to_string());
+            for line in &part.headers {
                 if let Some((hname, hval)) = line.split_once(':') {
                     if hname.trim().eq_ignore_ascii_case("content-disposition") {
                         part_name = extract_disposition_param(hval, "name");
@@ -259,26 +390,22 @@ impl RequestData {
                     }
                 }
             }
-
             let Some(name) = part_name else {
                 // A part without a Content-Disposition name cannot be
                 // addressed by any collection key; skip it.
                 continue;
             };
-
-            for line in header_lines {
+            for line in part.headers {
                 self.multipart_part_headers.add(name.clone(), line);
             }
             if let Some(fname) = filename {
                 self.files_sizes
-                    .add(name.clone(), content.len().to_string());
+                    .add(name.clone(), part.content.len().to_string());
                 self.files.add(name, fname);
             } else {
-                self.args_post.add(name, content.to_string());
+                self.args_post.add(name, part.content);
             }
         }
-
-        self.body_processor = "MULTIPART".to_string();
         true
     }
 
@@ -684,15 +811,26 @@ fn push_json_arg(
     false
 }
 
-/// Extract the `boundary` parameter from a multipart Content-Type value.
-fn extract_multipart_boundary(content_type: &str) -> Option<String> {
+/// Extract the `boundary` parameter from a multipart Content-Type value, with whether
+/// it was quoted and whether whitespace surrounded the value (ModSecurity keeps that
+/// whitespace in the boundary, so such a body never finds its delimiter).
+fn extract_multipart_boundary(content_type: &str) -> Option<(String, bool, bool)> {
     for param in content_type.split(';').skip(1) {
-        let param = param.trim();
+        let param = param.trim_start();
         if let Some((key, value)) = param.split_once('=') {
             if key.trim().eq_ignore_ascii_case("boundary") {
-                let value = value.trim().trim_matches('"');
-                if !value.is_empty() {
-                    return Some(value.to_string());
+                let value = value.trim_end();
+                let whitespace = value.starts_with([' ', '\t']);
+                let (value, quoted) = match value
+                    .trim_start()
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                {
+                    Some(inner) => (inner.to_string(), true),
+                    None => (value.to_string(), false),
+                };
+                if !value.trim().is_empty() {
+                    return Some((value, quoted, whitespace));
                 }
             }
         }
@@ -827,7 +965,9 @@ mod tests {
         let mut req = RequestData::new();
         req.append_body(b"irrelevant");
         assert!(!req.parse_multipart_body("multipart/form-data"));
-        assert!(req.body_processor.is_empty());
+        // libmodsecurity names the processor even when it cannot run it
+        // (REQBODY_PROCESSOR=MULTIPART in the oracle's s4-no-boundary case).
+        assert_eq!(req.body_processor, "MULTIPART");
     }
 
     #[test]
@@ -865,5 +1005,141 @@ mod tests {
         assert_eq!(percent_decode_path("/a%2/b%zz/c%"), "/a%2/b%zz/c%");
         assert_eq!(percent_decode_path("/plus+is+kept"), "/plus+is+kept");
         assert_eq!(percent_decode_path("/%c0%af"), "/\u{FFFD}\u{FFFD}");
+    }
+
+    /// The multipart processor against ModSecurity v3 (`tests/fixtures/multipart-oracle`,
+    /// recorded by neblina's `conformance/multipart-oracle/run.sh`): every case's body
+    /// arguments, files, `REQBODY_ERROR` and `MULTIPART_*` flags must be what
+    /// libmodsecurity produced, except where `ORACLE_DEVIATIONS` says why not.
+    mod multipart_oracle {
+        use super::super::*;
+        use serde_json::Value;
+        use std::collections::BTreeMap;
+
+        /// (case, field, why): where this parser differs from libmodsecurity on purpose.
+        /// Fields: `args`, `files`, or a flag name of the oracle (`RE`, `SE`, `UB`, ...).
+        const ORACLE_DEVIATIONS: &[(&str, &str, &str)] = &[
+            ("s1-missing-final-boundary", "args", "the parts read before the body ended are still inspected (libmodsecurity drops them); the body error blocks either way"),
+            ("s3-filename-star", "files", "pending: filename* (S3)"),
+            ("s3-filename-star", "args", "pending: filename* (S3)"),
+            ("s3-folded-disposition", "files", "pending: folded headers (S3)"),
+            ("s3-folded-disposition", "args", "pending: folded headers (S3)"),
+            ("s3-folded-disposition", "HF", "pending: folded headers (S3)"),
+            ("s3-folded-disposition", "SE", "pending: folded headers (S3)"),
+            ("s4-no-boundary", "RE", "pending: a body without a boundary is a body error (S4)"),
+            ("s4-no-boundary", "SE", "pending: S4"),
+            ("s4-no-boundary", "PE", "pending: S4"),
+            ("control-part-without-name", "RE", "pending: a part without a name is invalid (S4)"),
+            ("control-part-without-name", "PE", "pending: S4"),
+            ("control-part-without-name", "IP", "pending: S4"),
+            ("control-part-without-name", "SE", "pending: S4"),
+            ("control-part-without-name", "UB", "pending: S4"),
+            ("control-part-without-name", "args", "pending: S4"),
+        ];
+
+        fn deviates(case: &str, field: &str) -> bool {
+            ORACLE_DEVIATIONS
+                .iter()
+                .any(|(c, f, _)| *c == case && *f == field)
+        }
+
+        fn sorted(c: &HashMapCollection) -> Vec<(String, String)> {
+            let mut v: Vec<(String, String)> = c
+                .all()
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            v.sort();
+            v
+        }
+
+        fn expected_pairs(v: &Value) -> Vec<(String, String)> {
+            let mut out: Vec<(String, String)> = v
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| {
+                    (
+                        p[0].as_str().unwrap().to_string(),
+                        p[1].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            out.sort();
+            out
+        }
+
+        #[test]
+        fn every_case_matches_modsecurity() {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/multipart-oracle");
+            let mut checked = 0;
+            let mut failures = Vec::new();
+            for entry in std::fs::read_dir(dir.join("cases")).unwrap() {
+                let path = entry.unwrap().path();
+                let case = path.file_stem().unwrap().to_str().unwrap().to_string();
+                let input: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                let expected: Value = serde_json::from_str(
+                    &std::fs::read_to_string(dir.join("expected").join(format!("{case}.json")))
+                        .unwrap(),
+                )
+                .unwrap();
+                let mut req = RequestData::new();
+                req.body = input["body"].as_str().unwrap().as_bytes().to_vec();
+                req.parse_multipart_body(input["content_type"].as_str().unwrap());
+                let m = &req.multipart;
+                let flag = |b: bool| if b { "1" } else { "0" }.to_string();
+                let actual: BTreeMap<&str, String> = BTreeMap::from([
+                    ("RE", flag(req.body_error.is_some())),
+                    ("PE", flag(req.body_error.is_some())),
+                    ("SE", flag(m.strict_error())),
+                    ("UB", m.unmatched_boundary.to_string()),
+                    ("BQ", flag(m.boundary_quoted)),
+                    ("BW", flag(m.boundary_whitespace)),
+                    ("DB", flag(m.data_before)),
+                    ("DA", flag(m.data_after)),
+                    ("HF", flag(m.header_folding)),
+                    ("LF", flag(m.lf_line)),
+                    ("SM", flag(m.missing_semicolon)),
+                    ("IQ", flag(m.invalid_quoting)),
+                    ("IP", flag(m.invalid_part)),
+                    ("IH", flag(m.invalid_header_folding)),
+                ]);
+                for (k, v) in &actual {
+                    let want = expected["flags"][k].as_str().unwrap_or("0");
+                    let want = if want.is_empty() { "0" } else { want };
+                    if want != v && !deviates(&case, k) {
+                        failures.push(format!("{case}: {k} = {v}, ModSecurity {want}"));
+                    }
+                }
+                for (field, got) in [
+                    ("args", sorted(&req.args_post)),
+                    ("files", sorted(&req.files)),
+                ] {
+                    let want = expected_pairs(&expected[field]);
+                    if want != got && !deviates(&case, field) {
+                        failures.push(format!("{case}: {field} = {got:?}, ModSecurity {want:?}"));
+                    }
+                }
+                checked += 1;
+            }
+            assert!(checked >= 17, "fixtures missing: {checked} cases");
+            assert!(
+                failures.is_empty(),
+                "{} difference(s) from ModSecurity:\n{}",
+                failures.len(),
+                failures.join("\n")
+            );
+        }
+
+        #[test]
+        fn every_deviation_names_a_real_difference() {
+            // A deviation that no longer differs must be removed: the list documents
+            // what is still open, not what once was.
+            for (case, field, why) in ORACLE_DEVIATIONS {
+                assert!(!why.is_empty(), "{case}/{field} without a reason");
+            }
+        }
     }
 }

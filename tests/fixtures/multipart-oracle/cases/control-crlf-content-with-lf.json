@@ -1,0 +1,4 @@
+{
+  "content_type": "multipart/form-data; boundary=B",
+  "body": "--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"notes.txt\"\r\nContent-Type: text/plain\r\n\r\nline one\nline two\nline three\r\n--B--\r\n"
+}

@@ -1,0 +1,4 @@
+{
+  "content_type": "multipart/form-data; boundary=B",
+  "body": "--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx--B--\r\n--B\r\nContent-Disposition: form-data; name=\"hidden\"\r\n\r\n' or 1=1--\r\n--B--\r\n"
+}
