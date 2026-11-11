@@ -356,6 +356,17 @@ impl RequestData {
                     }
                     if line.is_empty() {
                         state = State::Content;
+                    } else if line.starts_with([' ', '\t']) {
+                        // A folded header (RFC 822 continuation): it belongs to the
+                        // header before it. Ignoring it hid `filename=` from FILES.
+                        match current.headers.last_mut() {
+                            Some(previous) => {
+                                previous.push(' ');
+                                previous.push_str(line.trim_start());
+                                self.multipart.header_folding = true;
+                            }
+                            None => self.multipart.invalid_header_folding = true,
+                        }
                     } else {
                         current.headers.push(line.to_string());
                     }
@@ -386,7 +397,11 @@ impl RequestData {
                 if let Some((hname, hval)) = line.split_once(':') {
                     if hname.trim().eq_ignore_ascii_case("content-disposition") {
                         part_name = extract_disposition_param(hval, "name");
-                        filename = extract_disposition_param(hval, "filename");
+                        // RFC 5987 `filename*=charset'lang'percent-encoded` names the
+                        // file as much as `filename=` does, and wins when both appear.
+                        filename = extract_disposition_param(hval, "filename*")
+                            .map(|v| decode_ext_value(&v))
+                            .or_else(|| extract_disposition_param(hval, "filename"));
                     }
                 }
             }
@@ -838,6 +853,21 @@ fn extract_multipart_boundary(content_type: &str) -> Option<(String, bool, bool)
     None
 }
 
+/// Decodes an RFC 5987 extended value (`charset'language'percent-encoded`): the
+/// percent-encoded bytes, read as UTF-8 (lossy). A value without the two quotes is
+/// taken as already decoded.
+fn decode_ext_value(value: &str) -> String {
+    let mut fields = value.splitn(3, '\'');
+    match (fields.next(), fields.next(), fields.next()) {
+        (Some(_charset), Some(_language), Some(encoded)) => {
+            percent_encoding::percent_decode_str(encoded)
+                .decode_utf8_lossy()
+                .into_owned()
+        }
+        _ => value.to_string(),
+    }
+}
+
 /// Extract a parameter value (e.g. `name`, `filename`) from a
 /// Content-Disposition header value.
 /// Decodes `%XX` escapes in a URI path. `+` is not a space in a path, an
@@ -1020,12 +1050,6 @@ mod tests {
         /// Fields: `args`, `files`, or a flag name of the oracle (`RE`, `SE`, `UB`, ...).
         const ORACLE_DEVIATIONS: &[(&str, &str, &str)] = &[
             ("s1-missing-final-boundary", "args", "the parts read before the body ended are still inspected (libmodsecurity drops them); the body error blocks either way"),
-            ("s3-filename-star", "files", "pending: filename* (S3)"),
-            ("s3-filename-star", "args", "pending: filename* (S3)"),
-            ("s3-folded-disposition", "files", "pending: folded headers (S3)"),
-            ("s3-folded-disposition", "args", "pending: folded headers (S3)"),
-            ("s3-folded-disposition", "HF", "pending: folded headers (S3)"),
-            ("s3-folded-disposition", "SE", "pending: folded headers (S3)"),
             ("s4-no-boundary", "RE", "pending: a body without a boundary is a body error (S4)"),
             ("s4-no-boundary", "SE", "pending: S4"),
             ("s4-no-boundary", "PE", "pending: S4"),
@@ -1131,6 +1155,25 @@ mod tests {
                 failures.len(),
                 failures.join("\n")
             );
+        }
+
+        #[test]
+        fn filename_star_and_folded_headers_name_files() {
+            let mut req = RequestData::new();
+            req.body = b"--B\r\nContent-Disposition: form-data; name=\"up\"; filename=\"a.txt\"; filename*=UTF-8''%C3%A9vil.php\r\n\r\nx\r\n--B\r\nContent-Disposition: form-data;\r\n\tname=\"second\"\r\n\r\ny\r\n--B--\r\n".to_vec();
+            assert!(req.parse_multipart_body("multipart/form-data; boundary=B"));
+            assert_eq!(
+                req.files.get("up"),
+                Some(vec!["\u{e9}vil.php"]),
+                "filename* wins over filename"
+            );
+            assert_eq!(
+                req.args_post.get("second"),
+                Some(vec!["y"]),
+                "a folded name is read"
+            );
+            assert!(req.multipart.header_folding && req.multipart.strict_error());
+            assert_eq!(decode_ext_value("no-quotes"), "no-quotes");
         }
 
         #[test]
