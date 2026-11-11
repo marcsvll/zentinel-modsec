@@ -280,6 +280,12 @@ impl RequestData {
     pub fn parse_multipart_body(&mut self, content_type: &str) -> bool {
         self.body_processor = "MULTIPART".to_string();
         let Some((boundary, quoted, whitespace)) = extract_multipart_boundary(content_type) else {
+            // Without a boundary nothing can be parsed: that is a body error, not an
+            // empty body (it used to leave ARGS_POST empty and REQBODY_ERROR at 0, so
+            // rule 200002 could not stop it). An empty `boundary=` is treated the same,
+            // where libmodsecurity reports nothing.
+            self.body_error = Some("Multipart: no usable boundary in Content-Type".to_string());
+            self.multipart.missing_boundary = true;
             return false;
         };
         self.multipart.boundary_quoted = quoted;
@@ -406,8 +412,15 @@ impl RequestData {
                 }
             }
             let Some(name) = part_name else {
-                // A part without a Content-Disposition name cannot be
-                // addressed by any collection key; skip it.
+                // A part without a Content-Disposition name cannot be addressed by
+                // any collection key: an invalid part, and a body error, as in
+                // libmodsecurity (which stops there; the named parts are still
+                // inspected here).
+                self.multipart.invalid_part = true;
+                self.multipart.unmatched_boundary = 0;
+                if self.body_error.is_none() {
+                    self.body_error = Some("Multipart: part without a name".to_string());
+                }
                 continue;
             };
             for line in part.headers {
@@ -1050,15 +1063,10 @@ mod tests {
         /// Fields: `args`, `files`, or a flag name of the oracle (`RE`, `SE`, `UB`, ...).
         const ORACLE_DEVIATIONS: &[(&str, &str, &str)] = &[
             ("s1-missing-final-boundary", "args", "the parts read before the body ended are still inspected (libmodsecurity drops them); the body error blocks either way"),
-            ("s4-no-boundary", "RE", "pending: a body without a boundary is a body error (S4)"),
-            ("s4-no-boundary", "SE", "pending: S4"),
-            ("s4-no-boundary", "PE", "pending: S4"),
-            ("control-part-without-name", "RE", "pending: a part without a name is invalid (S4)"),
-            ("control-part-without-name", "PE", "pending: S4"),
-            ("control-part-without-name", "IP", "pending: S4"),
-            ("control-part-without-name", "SE", "pending: S4"),
-            ("control-part-without-name", "UB", "pending: S4"),
-            ("control-part-without-name", "args", "pending: S4"),
+            ("control-part-without-name", "args", "the named parts are still inspected (libmodsecurity stops at the invalid part); the body error blocks either way"),
+            ("s4-empty-boundary", "RE", "an empty boundary is a body error here; libmodsecurity reports nothing, which leaves the body unparsed and unflagged (S4)"),
+            ("s4-empty-boundary", "PE", "as RE"),
+            ("s4-empty-boundary", "SE", "as RE: the missing boundary is a strict error, as for an absent one"),
         ];
 
         fn deviates(case: &str, field: &str) -> bool {
@@ -1099,6 +1107,7 @@ mod tests {
                 .join("tests/fixtures/multipart-oracle");
             let mut checked = 0;
             let mut failures = Vec::new();
+            let mut used: Vec<(String, String)> = Vec::new();
             for entry in std::fs::read_dir(dir.join("cases")).unwrap() {
                 let path = entry.unwrap().path();
                 let case = path.file_stem().unwrap().to_str().unwrap().to_string();
@@ -1133,8 +1142,12 @@ mod tests {
                 for (k, v) in &actual {
                     let want = expected["flags"][k].as_str().unwrap_or("0");
                     let want = if want.is_empty() { "0" } else { want };
-                    if want != v && !deviates(&case, k) {
-                        failures.push(format!("{case}: {k} = {v}, ModSecurity {want}"));
+                    if want != v {
+                        if deviates(&case, k) {
+                            used.push((case.clone(), k.to_string()));
+                        } else {
+                            failures.push(format!("{case}: {k} = {v}, ModSecurity {want}"));
+                        }
                     }
                 }
                 for (field, got) in [
@@ -1142,13 +1155,27 @@ mod tests {
                     ("files", sorted(&req.files)),
                 ] {
                     let want = expected_pairs(&expected[field]);
-                    if want != got && !deviates(&case, field) {
-                        failures.push(format!("{case}: {field} = {got:?}, ModSecurity {want:?}"));
+                    if want != got {
+                        if deviates(&case, field) {
+                            used.push((case.clone(), field.to_string()));
+                        } else {
+                            failures
+                                .push(format!("{case}: {field} = {got:?}, ModSecurity {want:?}"));
+                        }
                     }
                 }
                 checked += 1;
             }
             assert!(checked >= 17, "fixtures missing: {checked} cases");
+            // A deviation that no longer differs must go: the list documents what is
+            // still different, not what once was.
+            for (case, field, _) in ORACLE_DEVIATIONS {
+                if !used.iter().any(|(c, f)| c == case && f == field) {
+                    failures.push(format!(
+                        "{case}/{field}: listed as a deviation but matches ModSecurity"
+                    ));
+                }
+            }
             assert!(
                 failures.is_empty(),
                 "{} difference(s) from ModSecurity:\n{}",
@@ -1174,15 +1201,6 @@ mod tests {
             );
             assert!(req.multipart.header_folding && req.multipart.strict_error());
             assert_eq!(decode_ext_value("no-quotes"), "no-quotes");
-        }
-
-        #[test]
-        fn every_deviation_names_a_real_difference() {
-            // A deviation that no longer differs must be removed: the list documents
-            // what is still open, not what once was.
-            for (case, field, why) in ORACLE_DEVIATIONS {
-                assert!(!why.is_empty(), "{case}/{field} without a reason");
-            }
         }
     }
 }
