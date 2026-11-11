@@ -232,6 +232,69 @@ impl<'a> VariableResolver<'a> {
             VariableName::FilesNames => {
                 self.resolve_collection_names(&[&self.request.files], "FILES_NAMES", selection)
             }
+            // What the multipart processor noticed about the framing
+            // (`modsecurity.conf-recommended` rules 200003 and 200004). Absent
+            // unless the multipart processor ran, as in libmodsecurity.
+            VariableName::MultipartStrictCheck
+            | VariableName::MultipartStrictError
+            | VariableName::MultipartBoundaryQuoted
+            | VariableName::MultipartBoundaryWhitespace
+            | VariableName::MultipartDataAfter
+            | VariableName::MultipartDataBefore
+            | VariableName::MultipartFileLimitExceeded
+            | VariableName::MultipartHeaderFolding
+            | VariableName::MultipartInvalidHeaderFolding
+            | VariableName::MultipartInvalidPart
+            | VariableName::MultipartInvalidQuoting
+            | VariableName::MultipartLfLine
+            | VariableName::MultipartMissingSemicolon
+            | VariableName::MultipartUnmatchedBoundary => {
+                if self.request.body_processor != "MULTIPART" {
+                    return vec![];
+                }
+                let m = &self.request.multipart;
+                let (label, value): (&str, u8) = match name {
+                    VariableName::MultipartBoundaryQuoted => {
+                        ("MULTIPART_BOUNDARY_QUOTED", u8::from(m.boundary_quoted))
+                    }
+                    VariableName::MultipartBoundaryWhitespace => (
+                        "MULTIPART_BOUNDARY_WHITESPACE",
+                        u8::from(m.boundary_whitespace),
+                    ),
+                    VariableName::MultipartDataAfter => {
+                        ("MULTIPART_DATA_AFTER", u8::from(m.data_after))
+                    }
+                    VariableName::MultipartDataBefore => {
+                        ("MULTIPART_DATA_BEFORE", u8::from(m.data_before))
+                    }
+                    VariableName::MultipartFileLimitExceeded => (
+                        "MULTIPART_FILE_LIMIT_EXCEEDED",
+                        u8::from(m.file_limit_exceeded),
+                    ),
+                    VariableName::MultipartHeaderFolding => {
+                        ("MULTIPART_HEADER_FOLDING", u8::from(m.header_folding))
+                    }
+                    VariableName::MultipartInvalidHeaderFolding => (
+                        "MULTIPART_INVALID_HEADER_FOLDING",
+                        u8::from(m.invalid_header_folding),
+                    ),
+                    VariableName::MultipartInvalidPart => {
+                        ("MULTIPART_INVALID_PART", u8::from(m.invalid_part))
+                    }
+                    VariableName::MultipartInvalidQuoting => {
+                        ("MULTIPART_INVALID_QUOTING", u8::from(m.invalid_quoting))
+                    }
+                    VariableName::MultipartLfLine => ("MULTIPART_LF_LINE", u8::from(m.lf_line)),
+                    VariableName::MultipartMissingSemicolon => {
+                        ("MULTIPART_MISSING_SEMICOLON", u8::from(m.missing_semicolon))
+                    }
+                    VariableName::MultipartUnmatchedBoundary => {
+                        ("MULTIPART_UNMATCHED_BOUNDARY", m.unmatched_boundary)
+                    }
+                    _ => ("MULTIPART_STRICT_ERROR", u8::from(m.strict_error())),
+                };
+                vec![(label.to_string(), value.to_string())]
+            }
             VariableName::ReqBodyProcessor => {
                 if self.request.body_processor.is_empty() {
                     vec![]
