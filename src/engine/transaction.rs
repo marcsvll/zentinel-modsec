@@ -986,11 +986,19 @@ impl Transaction {
         };
         match &op.operation {
             SetVarOperation::Macro(raw) => {
-                let expanded = self.expand_operator_macros(raw);
+                // The operation is the rule's (`=`, `=+`, `=-`); only the
+                // operand is expanded, so a request cannot choose it.
+                let operation = if let Some(operand) = raw.strip_prefix('+') {
+                    SetVarOperation::Increment(leading_int(&self.expand_operator_macros(operand)))
+                } else if let Some(operand) = raw.strip_prefix('-') {
+                    SetVarOperation::Decrement(leading_int(&self.expand_operator_macros(operand)))
+                } else {
+                    SetVarOperation::Set(self.expand_operator_macros(raw))
+                };
                 let resolved = SetVarOp {
                     collection: op.collection.clone(),
                     name: name.clone(),
-                    operation: interpret_setvar_rhs(&expanded),
+                    operation,
                 };
                 crate::actions::apply_setvar(&mut self.tx, &resolved);
             }
@@ -1027,14 +1035,17 @@ fn has_capture(rule: &CompiledRule) -> bool {
         .any(|a| matches!(a, Action::Data(DataAction::Capture)))
 }
 
-fn interpret_setvar_rhs(value: &str) -> SetVarOperation {
-    if let Some(rest) = value.strip_prefix('+') {
-        SetVarOperation::Increment(rest.trim().parse().unwrap_or(0))
-    } else if let Some(rest) = value.strip_prefix('-') {
-        SetVarOperation::Decrement(rest.trim().parse().unwrap_or(0))
-    } else {
-        SetVarOperation::Set(value.to_string())
-    }
+/// A `setvar` operand as libmodsecurity reads it (`stoi`, or 0 when that
+/// fails): leading whitespace, an optional sign, then digits up to the first
+/// character that is not one.
+fn leading_int(operand: &str) -> i64 {
+    let s = operand.trim_start();
+    let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
+    let end = s.len() - digits.len()
+        + digits
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(digits.len());
+    s[..end].parse().unwrap_or(0)
 }
 
 impl std::fmt::Debug for Transaction {
