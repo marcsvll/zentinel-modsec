@@ -1,0 +1,5 @@
+GET /get?x=PATH%3D%2Ftmp%3A~%2B1 HTTP/1.1
+User-Agent: OWASP CRS test agent
+Host: localhost
+Accept: */*
+

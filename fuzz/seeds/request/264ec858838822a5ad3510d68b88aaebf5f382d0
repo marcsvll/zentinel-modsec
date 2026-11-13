@@ -1,0 +1,5 @@
+GET /jquery.nivo.slider.pack.js HTTP/1.1
+User-Agent: OWASP CRS test agent
+Host: localhost
+Accept: */*
+

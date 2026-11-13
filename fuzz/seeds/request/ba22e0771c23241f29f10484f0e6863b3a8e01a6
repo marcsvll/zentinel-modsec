@@ -1,0 +1,5 @@
+GET /api?id=xor%2099%3E HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+Accept: */*
+

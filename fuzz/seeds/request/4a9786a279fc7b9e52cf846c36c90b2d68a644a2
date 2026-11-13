@@ -1,0 +1,5 @@
+GET /get?foo=crypt%28abc%29 HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+Accept: */*
+

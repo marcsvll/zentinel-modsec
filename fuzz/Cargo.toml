@@ -1,0 +1,33 @@
+[package]
+name = "zentinel-modsec-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+description = "cargo-fuzz targets for the engine (not part of the crate)."
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+zentinel-modsec = { path = ".." }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "request"
+path = "fuzz_targets/request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rules"
+path = "fuzz_targets/rules.rs"
+test = false
+doc = false
+bench = false
+
+# Not a member of a workspace above it.
+[workspace]

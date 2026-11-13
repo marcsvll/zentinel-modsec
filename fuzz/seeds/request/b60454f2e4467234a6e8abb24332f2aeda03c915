@@ -1,0 +1,6 @@
+POST /post HTTP/1.1
+Accept: */*
+Host: localhost
+User-Agent: OWASP CRS test agent
+
+textarea=Hi%20lestat!

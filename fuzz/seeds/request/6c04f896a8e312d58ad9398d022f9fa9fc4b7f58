@@ -1,0 +1,5 @@
+GET /get?attackme=%0d%0alist%203 HTTP/1.1
+Accept: */*
+Host: localhost
+User-Agent: OWASP CRS test agent
+

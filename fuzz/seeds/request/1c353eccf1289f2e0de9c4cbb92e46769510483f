@@ -1,0 +1,5 @@
+GET /search?q=test%27%20or%201%3D HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+Accept: */*
+

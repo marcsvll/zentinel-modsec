@@ -1,0 +1,18 @@
+#!/bin/sh
+# Refuses to push a commit that ./gate.sh has not passed (the pass is recorded per tree
+# under .gate/). Install: git config core.hooksPath .githooks
+# GATE_UNGATED=<reason> pushes anyway and says so.
+zero=0000000000000000000000000000000000000000
+while read -r _local sha _remote _rsha; do
+  [ "$sha" = "$zero" ] && continue
+  commit=$(git rev-parse "$sha^{commit}" 2>/dev/null) || continue
+  tree=$(git rev-parse "$commit^{tree}")
+  [ -f "$(git rev-parse --show-toplevel)/.gate/$tree.ok" ] && continue
+  if [ -n "${GATE_UNGATED:-}" ]; then
+    echo "pre-push: $commit pushed without a gate pass: $GATE_UNGATED" >&2
+    continue
+  fi
+  echo "pre-push: no gate pass recorded for $commit; run ./gate.sh" >&2
+  exit 1
+done
+exit 0

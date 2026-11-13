@@ -1,0 +1,6 @@
+GET /get HTTP/1.1
+Accept: */*
+Cookie: session=<?php
+Host: localhost
+User-Agent: OWASP CRS test agent
+

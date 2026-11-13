@@ -1,0 +1,6 @@
+GET /video.mp4 HTTP/1.1
+User-Agent: OWASP CRS test agent
+Host: localhost
+Accept: */*
+Range: bytes=0-1023
+

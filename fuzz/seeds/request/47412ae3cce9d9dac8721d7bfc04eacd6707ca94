@@ -1,0 +1,6 @@
+POST /post HTTP/1.1
+User-Agent: OWASP CRS test agent
+Host: localhost
+Accept: */*
+
+932130-40=data%5Bindex%5D

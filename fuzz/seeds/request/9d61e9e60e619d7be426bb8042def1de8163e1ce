@@ -1,0 +1,5 @@
+GET /get?out=%3E%28tee%20log%29 HTTP/1.1
+User-Agent: OWASP CRS test agent
+Host: localhost
+Accept: */*
+

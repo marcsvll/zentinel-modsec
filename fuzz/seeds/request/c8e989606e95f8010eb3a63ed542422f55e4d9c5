@@ -1,0 +1,5 @@
+GET /filter?val=%27%20or%20xyz- HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+Accept: */*
+

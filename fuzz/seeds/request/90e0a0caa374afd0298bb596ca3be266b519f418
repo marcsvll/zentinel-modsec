@@ -1,0 +1,5 @@
+POST /post HTTP/1.1
+User-Agent: OWASP CRS test agent
+Host: localhost
+
+;stat%20space

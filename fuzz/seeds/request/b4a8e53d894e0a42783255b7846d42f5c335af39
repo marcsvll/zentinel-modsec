@@ -1,0 +1,5 @@
+GET /get?x=%3c%25%3d7*7%25%3e HTTP/1.1
+Accept: */*
+Host: localhost
+User-Agent: OWASP CRS test agent
+

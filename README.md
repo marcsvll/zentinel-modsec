@@ -4,6 +4,13 @@
 [![Documentation](https://docs.rs/zentinel-modsec/badge.svg)](https://docs.rs/zentinel-modsec)
 [![License](https://img.shields.io/crates/l/zentinel-modsec.svg)](LICENSE)
 
+> **This branch (`neblina/patches`) is the engine of the neblina WAF.** It started from
+> upstream `zentinel-modsec` 0.5.0 and is developed on its own since then: its versions
+> are the `neblina-engine-v*` tags, upstream changes are triaged and cherry-picked, and
+> every pushed commit has passed `./gate.sh`. Fuzz targets are under `fuzz/`; security
+> reports go to [SECURITY.md](SECURITY.md). The text below is upstream's README, and its
+> numbers are upstream's claims.
+
 **Pure Rust ModSecurity rule engine, measured against the OWASP CRS regression suite.**
 
 A ModSecurity rule engine written in Rust with zero C/C++ dependencies. Loads and

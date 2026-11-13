@@ -1,0 +1,5 @@
+GET /get?path=%2F%5Be%2F%2F%2F%5Dtc HTTP/1.1
+User-Agent: OWASP CRS test agent
+Host: localhost
+Accept: */*
+

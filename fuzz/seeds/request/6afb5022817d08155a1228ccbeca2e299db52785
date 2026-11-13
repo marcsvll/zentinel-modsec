@@ -1,0 +1,5 @@
+GET /endpoint?val=test%27or%200%3E HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+Accept: */*
+

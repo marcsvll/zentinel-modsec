@@ -1,0 +1,5 @@
+POST /webdav/file?_method=PROPFIND HTTP/1.1
+User-Agent: OWASP CRS test agent
+Host: localhost
+Accept: */*
+

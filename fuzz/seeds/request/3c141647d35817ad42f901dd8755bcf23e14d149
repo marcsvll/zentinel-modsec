@@ -1,0 +1,5 @@
+GET /~user/file.txt HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+Accept: */*
+

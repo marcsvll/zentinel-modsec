@@ -1,0 +1,4 @@
+GET /get?brid=DLZJ9w0c--9DeBML6-QCPI_2g HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+

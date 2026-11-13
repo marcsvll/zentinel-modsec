@@ -1,0 +1,5 @@
+GET /data?val=xor%20%27test%27%3E HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+Accept: */*
+

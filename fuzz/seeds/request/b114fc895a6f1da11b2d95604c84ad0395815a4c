@@ -1,0 +1,5 @@
+GET /get?foo=symlink%23x%28%29 HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+Accept: */*
+

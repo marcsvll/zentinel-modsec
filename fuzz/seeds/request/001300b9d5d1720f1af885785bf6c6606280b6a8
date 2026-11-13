@@ -1,0 +1,5 @@
+GET /get?data__has_key=is_admin HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+Accept: */*
+

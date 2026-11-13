@@ -1,0 +1,5 @@
+GET /compare?value=123%3C456 HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+Accept: */*
+

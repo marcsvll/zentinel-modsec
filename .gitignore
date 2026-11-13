@@ -7,3 +7,8 @@ Cargo.lock
 .vscode/
 *.log
 /test-rules
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/Cargo.lock
+/.gate

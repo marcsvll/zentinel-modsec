@@ -1,0 +1,4 @@
+GET /get?view%3Dimage.jpg%26ntdsutil%20snapshot HTTP/1.1
+Host: localhost
+User-Agent: OWASP CRS test agent
+
