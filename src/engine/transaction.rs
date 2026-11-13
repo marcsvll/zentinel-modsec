@@ -1,11 +1,13 @@
 //! Transaction processing for ModSecurity.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::chain::ChainState;
 use super::control::{CtlDirective, TransactionControls};
 use super::intervention::Intervention;
 use super::phase::Phase;
+use super::profile::{nanos, Profile, RuleProfile};
 use super::ruleset::{CompiledRule, CompiledRuleset, RuleEngineMode};
 use super::scoring::AnomalyScore;
 use crate::actions::{
@@ -73,6 +75,8 @@ pub struct Transaction {
     /// whole transaction, because audit logging wants to answer "what did
     /// rule 942100 actually see" after the fact.
     matched_data: Vec<MatchedData>,
+    /// Where the time went, when the caller asked (`enable_profile`).
+    profile: Option<Box<Profile>>,
 }
 
 /// The variable a rule matched on.
@@ -148,7 +152,22 @@ impl Transaction {
             captures: Vec::new(),
             controls: TransactionControls::default(),
             matched_data: Vec::new(),
+            profile: None,
         }
+    }
+
+    /// Record, from here on, where this transaction spends its time: per phase
+    /// and per rule (see [`Profile`]). Off by default; a transaction that is
+    /// not profiled pays one branch per rule. The clock reads add their own
+    /// cost, so a profile ranks rules and stages against each other; it is not
+    /// a benchmark.
+    pub fn enable_profile(&mut self) {
+        self.profile = Some(Box::default());
+    }
+
+    /// What was recorded since `enable_profile`.
+    pub fn profile(&self) -> Option<&Profile> {
+        self.profile.as_deref()
     }
 
     /// Set the client address, backing `REMOTE_ADDR` and `REMOTE_PORT`.
@@ -434,12 +453,23 @@ impl Transaction {
             return Ok(());
         }
 
+        let phase_start = self.profile.is_some().then(Instant::now);
         // Clone rules to avoid borrow conflicts with mutable self
         let rules: Vec<CompiledRule> = self.ruleset.rules_for_phase(phase).to_vec();
         if rules.is_empty() {
             return Ok(());
         }
+        if let (Some(profile), Some(start)) = (self.profile.as_mut(), phase_start) {
+            profile.begin_phase(phase, &rules, start.elapsed());
+        }
+        let result = self.run_phase_rules(phase, &rules);
+        if let (Some(profile), Some(start)) = (self.profile.as_mut(), phase_start) {
+            profile.end_phase(phase, start.elapsed());
+        }
+        result
+    }
 
+    fn run_phase_rules(&mut self, phase: Phase, rules: &[CompiledRule]) -> Result<()> {
         let mut chain_state = ChainState::new();
         // A chain is one logical rule: the starter's actions fire only when
         // every link matches, so they are held here until the chain completes.
@@ -522,7 +552,19 @@ impl Transaction {
             }
 
             // Evaluate rule
-            let outcome = self.evaluate_rule(rule)?;
+            let outcome = if self.profile.is_some() {
+                let mut timing = RuleProfile::default();
+                let start = Instant::now();
+                let outcome = self.evaluate_rule(rule, Some(&mut timing));
+                timing.total_ns = nanos(start.elapsed());
+                timing.evaluations = 1;
+                if let Some(profile) = self.profile.as_mut() {
+                    profile.add_rule(phase, idx, &timing);
+                }
+                outcome?
+            } else {
+                self.evaluate_rule(rule, None)?
+            };
             let matched = outcome.matched;
             let captures = outcome.captures;
 
@@ -729,7 +771,12 @@ impl Transaction {
     }
 
     /// Evaluate a single rule.
-    fn evaluate_rule(&self, rule: &CompiledRule) -> Result<RuleOutcome> {
+    fn evaluate_rule(
+        &self,
+        rule: &CompiledRule,
+        mut timing: Option<&mut RuleProfile>,
+    ) -> Result<RuleOutcome> {
+        let resolve_start = timing.is_some().then(Instant::now);
         let resolver = VariableResolver::new(
             &self.request,
             &self.response,
@@ -787,6 +834,10 @@ impl Transaction {
         if any_excluded && all_values.is_empty() {
             return Ok(RuleOutcome::no_match());
         }
+        if let (Some(t), Some(start)) = (timing.as_deref_mut(), resolve_start) {
+            t.resolve_ns = nanos(start.elapsed());
+            t.values = all_values.len() as u64;
+        }
 
         if all_values.is_empty() {
             // A rule with no variable specs at all (i.e. SecAction) runs its
@@ -822,6 +873,7 @@ impl Transaction {
         // `@ge %{tx.inbound_anomaly_score_threshold}`), expand them against the
         // current TX state and recompile the operator so the comparison runs
         // against the resolved value. Otherwise use the precompiled operator.
+        let compile_start = timing.is_some().then(Instant::now);
         let dynamic_operator;
         let operator: &dyn Operator = if rule.operator_spec.argument.contains("%{") {
             let expanded = self.expand_operator_macros(&rule.operator_spec.argument);
@@ -843,6 +895,9 @@ impl Transaction {
         // Every variable is tested: ModSecurity does not stop at the first
         // match, since the rule's `capture` and `setvar` run once per matched
         // variable (see `RuleOutcome::matches`).
+        if let (Some(t), Some(start)) = (timing.as_deref_mut(), compile_start) {
+            t.operator_compile_ns = nanos(start.elapsed());
+        }
         let multi_match = has_multi_match(rule);
         // Argument values are `String`s, so bytes that were not valid UTF-8 are
         // already replaced by the time an operator sees them; the request
@@ -864,13 +919,21 @@ impl Transaction {
                 }
                 continue;
             }
+            let transform_start = timing.is_some().then(Instant::now);
             let candidates: Vec<String> = if multi_match {
                 rule.transformations.apply_steps(&value)
             } else {
                 vec![rule.transformations.apply(&value).into_owned()]
             };
+            if let (Some(t), Some(start)) = (timing.as_deref_mut(), transform_start) {
+                t.transform_ns += nanos(start.elapsed());
+            }
             for transformed in candidates {
+                let operator_start = timing.is_some().then(Instant::now);
                 let result = operator.execute(&transformed);
+                if let (Some(t), Some(start)) = (timing.as_deref_mut(), operator_start) {
+                    t.operator_ns += nanos(start.elapsed());
+                }
 
                 let final_match = if rule.operator_negated {
                     !result.matched
