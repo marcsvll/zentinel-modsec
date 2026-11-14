@@ -584,147 +584,25 @@ impl RequestData {
     ///
     /// The whole document is also available as `REQUEST_BODY`.
     pub fn parse_xml_body(&mut self) -> Result<(), String> {
-        use quick_xml::events::Event;
-
         self.body_processor = "XML".to_string();
 
         if self.body.iter().all(|b| b.is_ascii_whitespace()) {
             return Ok(());
         }
 
-        let mut reader = quick_xml::Reader::from_reader(self.body.as_slice());
-        reader.config_mut().check_end_names = true;
-
-        let mut depth = 0usize;
-        // Elements and attribute values are counted against MAX_XML_ARGS: a body
-        // with tens of thousands of nodes is reported through REQBODY_ERROR
-        // rather than parsed in full.
-        let mut nodes = 0usize;
-        // Text arrives in fragments, split around entity references; they are
-        // appended to one document text, so a payload written as
-        // `UNION&#32;SELECT` stays whole for every rule.
+        // Whatever was read before an error stays available to the rules:
+        // under the XML processor REQUEST_BODY is empty, so text thrown away
+        // here would be content no rule could see. The error is reported as
+        // well, and rule 200002 refuses the request on it.
         let mut text = String::new();
-        let mut unresolved_entity: Option<String> = None;
-        let mut buf = Vec::new();
-
-        macro_rules! attributes {
-            ($e:expr) => {
-                nodes += 1;
-                for attr in $e.attributes().flatten() {
-                    nodes += 1;
-                    if nodes > MAX_XML_ARGS {
-                        let msg = xml_limit_message();
-                        self.body_error = Some(msg.clone());
-                        return Err(msg);
-                    }
-                    let value = attr
-                        .decoded_and_normalized_value(
-                            quick_xml::XmlVersion::Implicit1_0,
-                            reader.decoder(),
-                        )
-                        .map(|v| v.into_owned())
-                        .unwrap_or_default();
-                    self.xml_attributes.push(value);
-                }
-            };
-        }
-
-        loop {
-            match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) => {
-                    if depth >= MAX_XML_DEPTH {
-                        let msg = format!(
-                            "XML body exceeded {MAX_XML_DEPTH} levels of nesting; \
-                             only part of the body was inspected"
-                        );
-                        self.body_error = Some(msg.clone());
-                        return Err(msg);
-                    }
-                    depth += 1;
-                    attributes!(e);
-                    if nodes > MAX_XML_ARGS {
-                        let msg = xml_limit_message();
-                        self.body_error = Some(msg.clone());
-                        return Err(msg);
-                    }
-                }
-                Ok(Event::Empty(e)) => {
-                    attributes!(e);
-                    if nodes > MAX_XML_ARGS {
-                        let msg = xml_limit_message();
-                        self.body_error = Some(msg.clone());
-                        return Err(msg);
-                    }
-                }
-                Ok(Event::End(_)) => {
-                    depth = depth.saturating_sub(1);
-                }
-                Ok(Event::Text(e)) => {
-                    if let Ok(t) = e.decode() {
-                        text.push_str(t.as_ref());
-                    }
-                }
-                Ok(Event::CData(e)) => {
-                    // CDATA is text that is deliberately not markup, and a
-                    // classic place to hide a payload.
-                    text.push_str(&String::from_utf8_lossy(e.as_ref()));
-                }
-                Ok(Event::GeneralRef(e)) => {
-                    let name = e.decode().map(|n| n.into_owned()).unwrap_or_default();
-                    match resolve_entity(&name) {
-                        Some(resolved) => {
-                            text.push_str(&resolved);
-                        }
-                        None => {
-                            // A custom entity. Expanding it is how XXE and
-                            // billion-laughs work, so this deliberately does
-                            // not. But the origin application may expand it,
-                            // and content this engine cannot see is content it
-                            // cannot inspect -- so say so rather than treat
-                            // the document as fully examined.
-                            unresolved_entity.get_or_insert(name);
-                        }
-                    }
-                }
-                Ok(Event::Eof) => break,
-                Ok(_) => {}
-                Err(e) => {
-                    let msg = format!("XML parsing error: {e}");
-                    self.body_error = Some(msg.clone());
-                    return Err(msg);
-                }
-            }
-            buf.clear();
-        }
-
+        let outcome = read_xml(&self.body, &mut self.xml_attributes, &mut text);
         if !text.trim().is_empty() {
             self.xml_text.push(text);
         }
-
-        // Elements left open at end of input mean the document was cut short.
-        // quick-xml reports EOF rather than an error for this, so a truncated
-        // body would otherwise look like a complete one that simply had less
-        // in it.
-        if depth > 0 {
-            let msg = format!(
-                "XML body ended with {depth} element(s) still open; the document is truncated \
-                 and was only partly inspected"
-            );
+        if let Err(msg) = &outcome {
             self.body_error = Some(msg.clone());
-            return Err(msg);
         }
-
-        if let Some(name) = unresolved_entity {
-            let msg = format!(
-                "XML body references the undeclared or custom entity '&{name};', which is \
-                 not expanded (expanding it is how XXE and entity-expansion attacks work). \
-                 Any content it carries was not inspected."
-            );
-            self.body_error = Some(msg.clone());
-            return Err(msg);
-        }
-
-        Ok(())
+        outcome
     }
 
     /// Get all arguments (GET + POST combined).
@@ -732,6 +610,154 @@ impl RequestData {
         let mut all = self.args_get.all();
         all.extend(self.args_post.all());
         all
+    }
+}
+
+/// Read an XML document: attribute values go to `attributes` as they are
+/// found, text accumulates in `text`. On an error both hold what was read up
+/// to it.
+///
+/// Nothing the document carries is dropped quietly. A value that does not
+/// decode (bytes that are not UTF-8, a reference that does not resolve) is
+/// kept as its raw bytes, read leniently, so the rules still test it, and the
+/// document is reported as not fully understood; a malformed attribute is a
+/// parse error.
+fn read_xml(body: &[u8], attributes: &mut Vec<String>, text: &mut String) -> Result<(), String> {
+    use quick_xml::events::Event;
+
+    let mut reader = quick_xml::Reader::from_reader(body);
+    reader.config_mut().check_end_names = true;
+
+    let mut depth = 0usize;
+    // Elements and attribute values are counted against MAX_XML_ARGS: a body
+    // with tens of thousands of nodes is reported through REQBODY_ERROR
+    // rather than parsed in full.
+    let mut nodes = 0usize;
+    // The first thing that could not be decoded or resolved, reported once the
+    // whole document has been read.
+    let mut not_understood: Option<String> = None;
+    let mut buf = Vec::new();
+
+    macro_rules! element {
+        ($e:expr) => {
+            nodes += 1;
+            for attr in $e.attributes() {
+                let attr = attr.map_err(|e| format!("XML parsing error: malformed attribute: {e}"))?;
+                nodes += 1;
+                if nodes > MAX_XML_ARGS {
+                    return Err(xml_limit_message());
+                }
+                let value = match attr.decoded_and_normalized_value(
+                    quick_xml::XmlVersion::Implicit1_0,
+                    reader.decoder(),
+                ) {
+                    Ok(value) => value.into_owned(),
+                    Err(e) => {
+                        not_understood.get_or_insert_with(|| {
+                            format!(
+                                "XML body has an attribute value that could not be decoded \
+                                 ({e}); it was inspected as written"
+                            )
+                        });
+                        String::from_utf8_lossy(&attr.value).into_owned()
+                    }
+                };
+                attributes.push(value);
+            }
+            if nodes > MAX_XML_ARGS {
+                return Err(xml_limit_message());
+            }
+        };
+    }
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                if depth >= MAX_XML_DEPTH {
+                    return Err(format!(
+                        "XML body exceeded {MAX_XML_DEPTH} levels of nesting; \
+                         only part of the body was inspected"
+                    ));
+                }
+                depth += 1;
+                element!(e);
+            }
+            Ok(Event::Empty(e)) => {
+                element!(e);
+            }
+            Ok(Event::End(_)) => {
+                depth = depth.saturating_sub(1);
+            }
+            Ok(Event::Text(e)) => {
+                // Text arrives in fragments, split around entity references;
+                // they are appended to one document text, so a payload written
+                // as `UNION&#32;SELECT` stays whole for every rule.
+                match e.decode() {
+                    Ok(t) => text.push_str(t.as_ref()),
+                    Err(err) => {
+                        not_understood.get_or_insert_with(|| {
+                            format!(
+                                "XML body has text that could not be decoded ({err}); \
+                                 it was inspected as written"
+                            )
+                        });
+                        text.push_str(&String::from_utf8_lossy(e.as_ref()));
+                    }
+                }
+            }
+            Ok(Event::CData(e)) => {
+                // CDATA is text that is deliberately not markup, and a
+                // classic place to hide a payload.
+                text.push_str(&String::from_utf8_lossy(e.as_ref()));
+            }
+            Ok(Event::GeneralRef(e)) => {
+                let name = e
+                    .decode()
+                    .map(|n| n.into_owned())
+                    .unwrap_or_else(|_| String::from_utf8_lossy(e.as_ref()).into_owned());
+                match resolve_entity(&name) {
+                    Some(resolved) => {
+                        text.push_str(&resolved);
+                    }
+                    None => {
+                        // A custom entity. Expanding it is how XXE and
+                        // billion-laughs work, so this deliberately does
+                        // not. But the origin application may expand it,
+                        // and content this engine cannot see is content it
+                        // cannot inspect -- so say so rather than treat
+                        // the document as fully examined.
+                        not_understood.get_or_insert_with(|| {
+                            format!(
+                                "XML body references the undeclared or custom entity \
+                                 '&{name};', which is not expanded (expanding it is how XXE \
+                                 and entity-expansion attacks work). Any content it carries \
+                                 was not inspected."
+                            )
+                        });
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(e) => return Err(format!("XML parsing error: {e}")),
+        }
+        buf.clear();
+    }
+
+    // Elements left open at end of input mean the document was cut short.
+    // quick-xml reports EOF rather than an error for this, so a truncated
+    // body would otherwise look like a complete one that simply had less
+    // in it.
+    if depth > 0 {
+        return Err(format!(
+            "XML body ended with {depth} element(s) still open; the document is truncated \
+             and was only partly inspected"
+        ));
+    }
+
+    match not_understood {
+        Some(msg) => Err(msg),
+        None => Ok(()),
     }
 }
 

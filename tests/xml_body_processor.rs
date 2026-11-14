@@ -360,3 +360,84 @@ fn a_non_xml_content_type_is_not_parsed_as_xml() {
          SecRule ARGS:xml.a \"@rx .\" \"id:1,phase:2,deny\"";
     assert!(!run(rules, "text/plain", b"<a>value</a>"));
 }
+
+// ---------------------------------------------------------------------------
+// Nothing is dropped quietly (engine security review, S5)
+// ---------------------------------------------------------------------------
+
+/// Which of three observations hold for a body: the text carries `needle`, an
+/// attribute carries `needle`, the body is reported as an error.
+fn seen(body: &[u8], needle: &str) -> (bool, bool, bool) {
+    let rules = format!(
+        "SecRuleEngine On\n\
+         SecRule XML:/* \"@contains {needle}\" \"id:1,phase:2,pass,nolog,t:none\"\n\
+         SecRule XML://@* \"@contains {needle}\" \"id:2,phase:2,pass,nolog,t:none\"\n\
+         SecRule REQBODY_ERROR \"!@eq 0\" \"id:3,phase:2,pass,nolog\""
+    );
+    let m = ModSecurity::from_string(&rules).expect("rules should load");
+    let mut tx = m.new_transaction();
+    tx.process_uri("/api", "POST", "HTTP/1.1").unwrap();
+    tx.add_request_header("Content-Type", "application/xml")
+        .unwrap();
+    tx.process_request_headers().unwrap();
+    tx.append_request_body(body).unwrap();
+    tx.process_request_body().unwrap();
+    let fired = |id: &str| tx.matched_rules().iter().any(|r| r == id);
+    (fired("1"), fired("2"), fired("3"))
+}
+
+#[test]
+fn an_attribute_value_that_does_not_decode_is_inspected_as_written() {
+    // Not UTF-8: the value used to become an empty string, with no error.
+    let (_, in_attribute, error) = seen(b"<a b=\"\xff' OR 1=1--\"/>", "OR 1=1");
+    assert!(in_attribute, "the raw value must reach the rules");
+    assert!(error, "and the document is not fully understood");
+
+    // A reference that does not resolve inside an attribute, likewise.
+    let (_, in_attribute, error) = seen(b"<a b=\"x &custom; OR 1=1--\"/>", "OR 1=1");
+    assert!(in_attribute);
+    assert!(error);
+}
+
+#[test]
+fn a_malformed_attribute_is_a_parse_error_and_what_came_before_is_kept() {
+    // The unquoted attribute used to be skipped, and the document accepted.
+    let (_, in_attribute, error) =
+        seen(b"<a first=\"evil-marker\" b=unquoted>t</a>", "evil-marker");
+    assert!(error, "a malformed attribute is not well-formed XML");
+    assert!(
+        in_attribute,
+        "the attribute read before it is still inspected"
+    );
+}
+
+#[test]
+fn text_that_is_not_utf8_is_inspected_as_written() {
+    // The text node used to be dropped whole, with no error.
+    let (in_text, _, error) = seen(b"<a>\xff UNION SELECT</a>", "UNION SELECT");
+    assert!(in_text, "the text must reach the rules");
+    assert!(error);
+}
+
+#[test]
+fn text_read_before_a_parse_error_is_still_inspected() {
+    // REQUEST_BODY is empty under the XML processor, so text discarded on an
+    // error was text no rule could see.
+    let (in_text, _, error) = seen(b"<a>evil-marker</b>", "evil-marker");
+    assert!(error);
+    assert!(in_text, "what was read before the error is inspected");
+
+    let (in_text, _, error) = seen(b"<a><b>evil-marker</b>", "evil-marker");
+    assert!(error, "a truncated document");
+    assert!(in_text);
+}
+
+#[test]
+fn a_well_formed_document_reports_nothing() {
+    let (in_text, in_attribute, error) = seen(
+        "<a b=\"evil-marker &amp; caf\u{e9}\">evil-marker &lt; caf\u{e9}</a>".as_bytes(),
+        "evil-marker",
+    );
+    assert!(in_text && in_attribute);
+    assert!(!error);
+}
