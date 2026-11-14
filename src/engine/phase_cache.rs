@@ -96,33 +96,27 @@ impl Transformed {
 }
 
 impl Resolved {
-    /// Where this spec's values are kept, resolving them on first use.
-    ///
-    /// `None` when the variable can change while the phase runs (`TX`,
-    /// `MATCHED_VAR`, ...): those are resolved again by every rule.
-    pub(crate) fn slot(
-        &mut self,
-        resolver: &VariableResolver<'_>,
-        spec: &VariableSpec,
-    ) -> Option<usize> {
-        if !fixed_for_the_phase(spec.name) {
-            return None;
+    /// Resolve this spec's values if no rule of the phase has asked for them
+    /// yet. Nothing to do for a variable that can change while the phase runs
+    /// (`TX`, `MATCHED_VAR`, ...): those are resolved again by every rule.
+    pub(crate) fn prepare(&mut self, resolver: &VariableResolver<'_>, spec: &VariableSpec) {
+        if fixed_for_the_phase(spec.name) && self.slot(spec).is_none() {
+            self.entries.push(Entry {
+                name: spec.name,
+                selection: spec.selection.clone(),
+                values: resolver.resolve_unfiltered(spec),
+            });
         }
+    }
+
+    /// Where this spec's values are kept, once prepared; `None` for a variable
+    /// that is not shared.
+    pub(crate) fn slot(&self, spec: &VariableSpec) -> Option<usize> {
         // A phase of the CRS asks for a few dozen distinct variables; a scan
         // costs less than hashing the selection would.
-        if let Some(found) = self
-            .entries
+        self.entries
             .iter()
             .position(|e| e.name == spec.name && e.selection == spec.selection)
-        {
-            return Some(found);
-        }
-        self.entries.push(Entry {
-            name: spec.name,
-            selection: spec.selection.clone(),
-            values: resolver.resolve_unfiltered(spec),
-        });
-        Some(self.entries.len() - 1)
     }
 
     /// The values kept at `slot`, as `(name, value)`.

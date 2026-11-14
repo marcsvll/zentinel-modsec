@@ -819,11 +819,9 @@ impl Transaction {
         // The request does not change during a phase, so what a spec selects
         // from it is resolved once per phase and borrowed here (see
         // `PhaseCache`); TX and the matched variables are resolved every time.
-        let slots: Vec<Option<usize>> = rule
-            .variables
-            .iter()
-            .map(|spec| cache.resolved.slot(&resolver, spec))
-            .collect();
+        for spec in &rule.variables {
+            cache.resolved.prepare(&resolver, spec);
+        }
         let PhaseCache {
             resolved,
             transformed,
@@ -833,7 +831,8 @@ impl Transaction {
         // Name, value and, for a value shared by the phase, where it is kept.
         let mut all_values: Vec<(Cow<'_, str>, Cow<'_, str>, Option<ValueAt>)> = Vec::new();
         let mut any_excluded = false;
-        for (spec, slot) in rule.variables.iter().zip(slots) {
+        for spec in &rule.variables {
+            let slot = resolved_values.slot(spec);
             let resolved: Cow<'_, [(String, String)]> = match slot {
                 Some(slot) => Cow::Borrowed(resolved_values.values(slot)),
                 None => Cow::Owned(resolver.resolve_unfiltered(spec)),
