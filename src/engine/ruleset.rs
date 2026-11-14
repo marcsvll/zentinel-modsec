@@ -222,6 +222,7 @@ impl CompiledRuleset {
 
                     report_unimplemented_variables(&rule.variables, &id);
 
+                    reject_macro_in_compiled_operand(&rule.operator, &id)?;
                     let operator_spec = rule.operator.clone();
                     let (operator, operator_negated) =
                         compile_operator_reporting(&rule.operator, &id)?;
@@ -506,6 +507,43 @@ fn report_unsupported_xml_selectors(variables: &[VariableSpec], rule_id: &Option
              will match nothing"
         );
     }
+}
+
+/// Refuse a rule whose operator would be compiled from text that is only
+/// known per request.
+///
+/// A macro in an operand is expanded on every evaluation, and the operator
+/// built again from the result. For a comparison that is a string or a number
+/// to compare with (`@ge %{tx.threshold}`, `@within %{tx.allowed_methods}`),
+/// which is how the CRS uses it. For `@rx`, `@pm` and `@ipMatch` it would be a
+/// pattern, a phrase list or a network list compiled from data the request
+/// can reach, on every value; for the `FromFile` operators, a path. None of
+/// that is something to find out in production: the rule is an error when the
+/// rules load.
+fn reject_macro_in_compiled_operand(spec: &OperatorSpec, rule_id: &Option<String>) -> Result<()> {
+    let compiled_from_operand = matches!(
+        spec.name,
+        OperatorName::Rx
+            | OperatorName::Pm
+            | OperatorName::Pmf
+            | OperatorName::PmFromFile
+            | OperatorName::IpMatch
+            | OperatorName::IpMatchF
+            | OperatorName::IpMatchFromFile
+    );
+    if compiled_from_operand && spec.argument.contains("%{") {
+        return Err(crate::error::Error::Config {
+            message: format!(
+                "rule {}: a macro in the operand of @{:?} is not supported \
+                 (the operator would be compiled from request data on every \
+                 evaluation): {}",
+                rule_id.as_deref().unwrap_or("(no id)"),
+                spec.name,
+                spec.argument
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn compile_operator_reporting(
