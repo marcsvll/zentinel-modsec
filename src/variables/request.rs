@@ -191,11 +191,17 @@ impl RequestData {
 
     /// Parse a `Cookie` request header into the cookies collection.
     fn parse_cookie_header(&mut self, value: &str) {
+        let mut cookies = self.cookies.count();
         for pair in value.split(';') {
             let pair = pair.trim();
             if pair.is_empty() {
                 continue;
             }
+            if cookies >= MAX_ARGS {
+                self.note_too_many("cookies");
+                break;
+            }
+            cookies += 1;
             match pair.split_once('=') {
                 Some((k, v)) => self.cookies.add(k.trim().to_string(), v.trim().to_string()),
                 None => self.cookies.add(pair.to_string(), String::new()),
@@ -220,7 +226,16 @@ impl RequestData {
 
     /// Parse query string into args_get.
     fn parse_query_string(&mut self, qs: &str) {
+        let mut arguments = self.argument_count();
         for pair in qs.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            if arguments >= MAX_ARGS {
+                self.note_too_many("arguments");
+                break;
+            }
+            arguments += 1;
             if let Some(pos) = pair.find('=') {
                 let key = &pair[..pos];
                 let value = &pair[pos + 1..];
@@ -234,6 +249,22 @@ impl RequestData {
                 self.note_utf8(&key, key_ok, true);
                 self.args_get.add(key, String::new());
             }
+        }
+    }
+
+    /// Arguments collected so far, from the query string and the body.
+    fn argument_count(&self) -> usize {
+        self.args_get.count() + self.args_post.count()
+    }
+
+    /// The request has more fields of one kind than [`MAX_ARGS`]: the rest was
+    /// not collected, so it was not inspected, and that is reported the way
+    /// every partially inspected body is, through `REQBODY_ERROR`.
+    fn note_too_many(&mut self, what: &str) {
+        if self.body_error.is_none() {
+            self.body_error = Some(format!(
+                "request has more than {MAX_ARGS} {what}; only the first {MAX_ARGS} were inspected"
+            ));
         }
     }
 
@@ -396,7 +427,12 @@ impl RequestData {
             self.multipart.unmatched_boundary = 2;
         }
 
-        for part in parts {
+        // Fields and files count alike: each part is one thing to inspect.
+        let room = MAX_ARGS.saturating_sub(self.argument_count() + self.files.count());
+        if parts.len() > room {
+            self.note_too_many("arguments");
+        }
+        for part in parts.into_iter().take(room) {
             let mut part_name: Option<String> = None;
             let mut filename: Option<String> = None;
             for line in &part.headers {
@@ -440,7 +476,16 @@ impl RequestData {
     /// Parse form body into args_post.
     pub fn parse_form_body(&mut self) {
         let body_str = self.body_str();
+        let mut arguments = self.argument_count();
         for pair in body_str.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            if arguments >= MAX_ARGS {
+                self.note_too_many("arguments");
+                break;
+            }
+            arguments += 1;
             if let Some(pos) = pair.find('=') {
                 let key = &pair[..pos];
                 let value = &pair[pos + 1..];
@@ -752,6 +797,18 @@ fn form_decode_checked(component: &str) -> (String, bool) {
         Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), false),
     }
 }
+
+/// Most fields of one kind collected from a request: arguments (query string,
+/// urlencoded body and multipart parts together) and cookies.
+///
+/// `a&a&a...` is two bytes per argument, and every argument is tested by every
+/// rule over `ARGS`: without a bound, a body of a few hundred kilobytes buys
+/// hundreds of thousands of operator calls per rule. The JSON and XML
+/// processors already had theirs. As there, going over is reported as a
+/// body-processor error (`REQBODY_ERROR`), not silently truncated: a partially
+/// inspected request is not a safe one. ModSecurity's `SecArgumentsLimit`
+/// defaults to 1000; this is the engine's own, higher, fixed bound.
+const MAX_ARGS: usize = 4096;
 
 /// Most arguments extracted from a single JSON body.
 ///
