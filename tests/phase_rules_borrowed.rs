@@ -1,40 +1,10 @@
 //! Running a phase borrows the ruleset's rules: what a transaction allocates
 //! does not grow with the number of rules it never evaluates.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
+mod common;
 
+use common::allocations;
 use zentinel_modsec::ModSecurity;
-
-thread_local! {
-    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-}
-
-/// Counts the allocations of the calling thread, so tests running in parallel
-/// do not see each other's.
-struct Counting;
-
-// SAFETY: every call is forwarded unchanged to the system allocator; the
-// counter is a thread-local `Cell` with a const initializer, which neither
-// allocates nor registers a destructor.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.with(|n| n.set(n.get() + 1));
-        System.alloc(layout)
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.with(|n| n.set(n.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: Counting = Counting;
 
 /// A phase-1 ruleset whose first rule jumps over `skipped` rules.
 fn rules(skipped: usize) -> String {
@@ -60,9 +30,9 @@ fn allocations_of_a_transaction(skipped: usize) -> u64 {
     tx.process_uri("/", "GET", "HTTP/1.1").unwrap();
     tx.add_request_header("Host", "example.com").unwrap();
 
-    let before = ALLOCATIONS.with(Cell::get);
+    let before = allocations();
     tx.process_request_headers().unwrap();
-    let after = ALLOCATIONS.with(Cell::get);
+    let after = allocations();
 
     assert!(tx.intervention().is_none(), "the skipped rules never ran");
     after - before

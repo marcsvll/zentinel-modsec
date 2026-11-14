@@ -84,6 +84,14 @@ impl Operator for RxOperator {
             return OperatorResult::no_match();
         };
 
+        // Nearly every value matches nothing. Asking for the groups reserves
+        // room for all of them before searching -- several hundred bytes for
+        // the larger CRS patterns, on every value of every rule -- so ask
+        // first whether there is a match at all, which reserves nothing.
+        if !regex.is_match(value) {
+            return OperatorResult::no_match();
+        }
+
         if let Some(captures) = regex.captures(value) {
             let matched_value = captures.get(0).map(|m| m.as_str().to_string());
             let capture_groups: Vec<String> = captures

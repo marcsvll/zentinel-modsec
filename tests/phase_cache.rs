@@ -4,40 +4,10 @@
 //! `ctl` removed, the variables rules write to while the phase runs, and what
 //! a different chain makes of the same value.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
+mod common;
 
+use common::allocations;
 use zentinel_modsec::ModSecurity;
-
-thread_local! {
-    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-}
-
-/// Counts the allocations of the calling thread, so tests running in parallel
-/// do not see each other's.
-struct Counting;
-
-// SAFETY: every call is forwarded unchanged to the system allocator; the
-// counter is a thread-local `Cell` with a const initializer, which neither
-// allocates nor registers a destructor.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.with(|n| n.set(n.get() + 1));
-        System.alloc(layout)
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.with(|n| n.set(n.get() + 1));
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static GLOBAL: Counting = Counting;
 
 const ARGUMENTS: usize = 50;
 
@@ -72,9 +42,9 @@ fn allocations_with(rules: usize, transformations: &str, uri: &str) -> u64 {
     let mut tx = msc.new_transaction();
     tx.process_uri(uri, "GET", "HTTP/1.1").unwrap();
 
-    let before = ALLOCATIONS.with(Cell::get);
+    let before = allocations();
     tx.process_request_headers().unwrap();
-    let after = ALLOCATIONS.with(Cell::get);
+    let after = allocations();
 
     assert!(tx.intervention().is_none());
     after - before
@@ -156,9 +126,9 @@ fn an_exclusion_by_pattern_costs_no_allocation_per_name() {
         let msc = ModSecurity::from_string(&text).expect("rules should load");
         let mut tx = msc.new_transaction();
         tx.process_uri(&uri, "GET", "HTTP/1.1").unwrap();
-        let before = ALLOCATIONS.with(Cell::get);
+        let before = allocations();
         tx.process_request_headers().unwrap();
-        ALLOCATIONS.with(Cell::get) - before
+        allocations() - before
     };
     let per_rule = (with(40) - with(20)) / 20;
     assert!(
