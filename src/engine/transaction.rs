@@ -454,15 +454,19 @@ impl Transaction {
         }
 
         let phase_start = self.profile.is_some().then(Instant::now);
-        // Clone rules to avoid borrow conflicts with mutable self
-        let rules: Vec<CompiledRule> = self.ruleset.rules_for_phase(phase).to_vec();
+        // The rules are borrowed from the ruleset, which is shared and never
+        // changes; holding it through its own handle leaves `self` free to be
+        // borrowed mutably. Copying the phase's rules here instead cost more
+        // than evaluating them on a request with nothing in it.
+        let ruleset = Arc::clone(&self.ruleset);
+        let rules = ruleset.rules_for_phase(phase);
         if rules.is_empty() {
             return Ok(());
         }
         if let (Some(profile), Some(start)) = (self.profile.as_mut(), phase_start) {
-            profile.begin_phase(phase, &rules, start.elapsed());
+            profile.begin_phase(phase, rules, start.elapsed());
         }
-        let result = self.run_phase_rules(phase, &rules);
+        let result = self.run_phase_rules(phase, rules);
         if let (Some(profile), Some(start)) = (self.profile.as_mut(), phase_start) {
             profile.end_phase(phase, start.elapsed());
         }
