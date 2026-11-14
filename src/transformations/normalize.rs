@@ -6,14 +6,31 @@ use std::borrow::Cow;
 /// Lowercase transformation.
 pub struct Lowercase;
 
-impl Transformation for Lowercase {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+impl Lowercase {
+    /// Whether the transformation would leave `input` as it is, decided
+    /// without building anything. ASCII with no capital letter is its own lower case.
+    fn untouched(input: &str) -> bool {
+        input
+            .bytes()
+            .all(|b| b.is_ascii() && !b.is_ascii_uppercase())
+    }
+
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         let lower = input.to_lowercase();
         if lower == input {
             Cow::Borrowed(input)
         } else {
             Cow::Owned(lower)
         }
+    }
+}
+
+impl Transformation for Lowercase {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
     }
 
     fn name(&self) -> &'static str {
@@ -42,8 +59,14 @@ impl Transformation for Uppercase {
 /// Compress whitespace transformation.
 pub struct CompressWhitespace;
 
-impl Transformation for CompressWhitespace {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+impl CompressWhitespace {
+    /// Whether the transformation would leave `input` as it is, decided
+    /// without building anything. With no whitespace there is nothing to compress.
+    fn untouched(input: &str) -> bool {
+        !input.chars().any(char::is_whitespace)
+    }
+
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         let mut result = String::new();
         let mut last_was_space = false;
         let mut modified = false;
@@ -70,6 +93,15 @@ impl Transformation for CompressWhitespace {
             Cow::Owned(result)
         }
     }
+}
+
+impl Transformation for CompressWhitespace {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
+    }
 
     fn name(&self) -> &'static str {
         "compressWhitespace"
@@ -79,14 +111,29 @@ impl Transformation for CompressWhitespace {
 /// Remove whitespace transformation.
 pub struct RemoveWhitespace;
 
-impl Transformation for RemoveWhitespace {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+impl RemoveWhitespace {
+    /// Whether the transformation would leave `input` as it is, decided
+    /// without building anything. With no whitespace there is nothing to remove.
+    fn untouched(input: &str) -> bool {
+        !input.chars().any(char::is_whitespace)
+    }
+
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         let result: String = input.chars().filter(|c| !c.is_whitespace()).collect();
         if result == input {
             Cow::Borrowed(input)
         } else {
             Cow::Owned(result)
         }
+    }
+}
+
+impl Transformation for RemoveWhitespace {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
     }
 
     fn name(&self) -> &'static str {
@@ -183,8 +230,17 @@ impl Transformation for TrimRight {
 /// Normalize path transformation (Unix-style).
 pub struct NormalizePath;
 
-impl Transformation for NormalizePath {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+impl NormalizePath {
+    /// Whether the transformation would leave `input` as it is, decided
+    /// without building anything. No backslash, no repeated slash and no `.` or `..` segment: the path is
+    /// already normal.
+    fn untouched(input: &str) -> bool {
+        !input.contains('\\')
+            && !input.contains("//")
+            && !input.split('/').any(|part| part == "." || part == "..")
+    }
+
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         let mut result = String::new();
         let mut modified = false;
 
@@ -254,6 +310,15 @@ impl Transformation for NormalizePath {
             Cow::Borrowed(input)
         }
     }
+}
+
+impl Transformation for NormalizePath {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
+    }
 
     fn name(&self) -> &'static str {
         "normalizePath"
@@ -280,8 +345,14 @@ impl Transformation for NormalizePathWin {
 /// Remove comments transformation.
 pub struct RemoveComments;
 
-impl Transformation for RemoveComments {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+impl RemoveComments {
+    /// Whether the transformation would leave `input` as it is, decided
+    /// without building anything. Only `/*` opens a comment.
+    fn untouched(input: &str) -> bool {
+        !input.contains("/*")
+    }
+
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         let mut result = String::new();
         let mut in_comment = false;
         let mut chars = input.chars().peekable();
@@ -306,6 +377,15 @@ impl Transformation for RemoveComments {
             Cow::Owned(result)
         }
     }
+}
+
+impl Transformation for RemoveComments {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
+    }
 
     fn name(&self) -> &'static str {
         "removeComments"
@@ -315,8 +395,14 @@ impl Transformation for RemoveComments {
 /// Replace comments transformation (replaces /* ... */ with space).
 pub struct ReplaceComments;
 
-impl Transformation for ReplaceComments {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+impl ReplaceComments {
+    /// Whether the transformation would leave `input` as it is, decided
+    /// without building anything. Only `/*` opens a comment.
+    fn untouched(input: &str) -> bool {
+        !input.contains("/*")
+    }
+
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         let mut result = String::new();
         let mut in_comment = false;
         let mut chars = input.chars().peekable();
@@ -344,6 +430,15 @@ impl Transformation for ReplaceComments {
             Cow::Borrowed(input)
         }
     }
+}
+
+impl Transformation for ReplaceComments {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
+    }
 
     fn name(&self) -> &'static str {
         "replaceComments"
@@ -353,8 +448,17 @@ impl Transformation for ReplaceComments {
 /// Remove comment characters transformation.
 pub struct RemoveCommentsChar;
 
-impl Transformation for RemoveCommentsChar {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+impl RemoveCommentsChar {
+    /// Whether the transformation would leave `input` as it is, decided
+    /// without building anything. None of the four markers is there to remove.
+    fn untouched(input: &str) -> bool {
+        !input.contains("/*")
+            && !input.contains("*/")
+            && !input.contains("--")
+            && !input.contains('#')
+    }
+
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         // Remove /*, */, --, and #
         let mut result = input.to_string();
         result = result.replace("/*", "");
@@ -367,6 +471,15 @@ impl Transformation for RemoveCommentsChar {
         } else {
             Cow::Owned(result)
         }
+    }
+}
+
+impl Transformation for RemoveCommentsChar {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
     }
 
     fn name(&self) -> &'static str {
@@ -438,7 +551,37 @@ impl Transformation for Utf8ToUnicode {
 /// Command line normalization transformation.
 pub struct CmdLine;
 
-impl Transformation for CmdLine {
+impl CmdLine {
+    /// Whether the command line is already in its normal form: lower-case
+    /// ASCII with none of the deleted characters or separators, no whitespace
+    /// other than single spaces, and no space before `/` or `(`.
+    fn untouched(input: &str) -> bool {
+        let mut after_space = false;
+        for b in input.bytes() {
+            match b {
+                b' ' => {
+                    if after_space {
+                        return false;
+                    }
+                    after_space = true;
+                }
+                b'/' | b'(' => {
+                    if after_space {
+                        return false;
+                    }
+                }
+                b'\\' | b'"' | b'\'' | b'^' | b',' | b';' => return false,
+                _ if !b.is_ascii() || b.is_ascii_uppercase() || b.is_ascii_whitespace() => {
+                    return false
+                }
+                // Vertical tab is whitespace to `char::is_whitespace`.
+                0x0b => return false,
+                _ => after_space = false,
+            }
+        }
+        true
+    }
+
     /// Normalise a Windows/Unix command line the way ModSecurity does.
     ///
     /// The steps, and the order, are ModSecurity's:
@@ -454,7 +597,7 @@ impl Transformation for CmdLine {
     /// regexes are written against the collapsed form. Rule 932140 looks for
     /// `in\(`, with no space, so `for %v in (set) do cmd` only matches once
     /// `in (set)` has become `in(set)`.
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         let mut result = String::with_capacity(input.len());
         // Whether the last character written was a space we introduced, and so
         // may still be removed by a following `/` or `(`.
@@ -498,6 +641,15 @@ impl Transformation for CmdLine {
             Cow::Owned(result)
         }
     }
+}
+
+impl Transformation for CmdLine {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
+    }
 
     fn name(&self) -> &'static str {
         "cmdLine"
@@ -507,8 +659,14 @@ impl Transformation for CmdLine {
 /// Escape sequence decode transformation.
 pub struct EscapeSeqDecode;
 
-impl Transformation for EscapeSeqDecode {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+impl EscapeSeqDecode {
+    /// Whether the transformation would leave `input` as it is, decided
+    /// without building anything. Only a backslash starts an escape.
+    fn untouched(input: &str) -> bool {
+        !input.contains('\\')
+    }
+
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         // Decode escape sequences like \n, \r, \t, \xHH, \uHHHH
         let mut result = String::new();
         let mut chars = input.chars().peekable();
@@ -587,6 +745,15 @@ impl Transformation for EscapeSeqDecode {
             Cow::Borrowed(input)
         }
     }
+}
+
+impl Transformation for EscapeSeqDecode {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
+    }
 
     fn name(&self) -> &'static str {
         "escapeSeqDecode"
@@ -613,6 +780,65 @@ impl Transformation for Sha256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shortcut of each transformation only ever answers for inputs the
+    /// full transformation leaves as they are, and it does answer for an
+    /// ordinary value.
+    #[test]
+    fn test_untouched_implies_unchanged() {
+        type Check = (&'static str, fn(&str) -> bool, fn(&str) -> Cow<'_, str>);
+        let checks: [Check; 9] = [
+            ("Lowercase", Lowercase::untouched, Lowercase::full),
+            (
+                "CompressWhitespace",
+                CompressWhitespace::untouched,
+                CompressWhitespace::full,
+            ),
+            (
+                "RemoveWhitespace",
+                RemoveWhitespace::untouched,
+                RemoveWhitespace::full,
+            ),
+            (
+                "NormalizePath",
+                NormalizePath::untouched,
+                NormalizePath::full,
+            ),
+            (
+                "RemoveComments",
+                RemoveComments::untouched,
+                RemoveComments::full,
+            ),
+            (
+                "ReplaceComments",
+                ReplaceComments::untouched,
+                ReplaceComments::full,
+            ),
+            (
+                "RemoveCommentsChar",
+                RemoveCommentsChar::untouched,
+                RemoveCommentsChar::full,
+            ),
+            (
+                "EscapeSeqDecode",
+                EscapeSeqDecode::untouched,
+                EscapeSeqDecode::full,
+            ),
+            ("CmdLine", CmdLine::untouched, CmdLine::full),
+        ];
+        let inputs = crate::transformations::short_inputs();
+        for (name, untouched, full) in checks {
+            assert!(untouched("ordinaryvalue123"), "{name}");
+            let mut taken = 0;
+            for input in &inputs {
+                if untouched(input) {
+                    taken += 1;
+                    assert_eq!(full(input), input.as_str(), "{name} on {input:?}");
+                }
+            }
+            assert!(taken > 0, "{name}");
+        }
+    }
 
     #[test]
     fn test_lowercase() {

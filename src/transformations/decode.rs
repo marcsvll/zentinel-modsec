@@ -37,8 +37,14 @@ impl Transformation for UrlDecode {
 /// URL decode with Unicode support.
 pub struct UrlDecodeUni;
 
-impl Transformation for UrlDecodeUni {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+impl UrlDecodeUni {
+    /// Whether the transformation would leave `input` as it is, decided
+    /// without building anything. Only `%` and `+` are decoded.
+    fn untouched(input: &str) -> bool {
+        !input.contains(['%', '+'])
+    }
+
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         // Handle %uXXXX unicode escapes in addition to standard URL encoding
         let mut result = String::new();
         let mut chars = input.chars().peekable();
@@ -95,6 +101,15 @@ impl Transformation for UrlDecodeUni {
         } else {
             Cow::Borrowed(input)
         }
+    }
+}
+
+impl Transformation for UrlDecodeUni {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
     }
 
     fn name(&self) -> &'static str {
@@ -193,8 +208,14 @@ impl Transformation for HtmlEntityDecode {
 /// JavaScript decode transformation.
 pub struct JsDecode;
 
-impl Transformation for JsDecode {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+impl JsDecode {
+    /// Whether the transformation would leave `input` as it is, decided
+    /// without building anything. Only a backslash starts an escape.
+    fn untouched(input: &str) -> bool {
+        !input.contains('\\')
+    }
+
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         let mut result = String::new();
         let mut chars = input.chars().peekable();
         let mut modified = false;
@@ -264,6 +285,15 @@ impl Transformation for JsDecode {
             Cow::Borrowed(input)
         }
     }
+}
+
+impl Transformation for JsDecode {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
+    }
 
     fn name(&self) -> &'static str {
         "jsDecode"
@@ -273,8 +303,14 @@ impl Transformation for JsDecode {
 /// CSS decode transformation.
 pub struct CssDecode;
 
-impl Transformation for CssDecode {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+impl CssDecode {
+    /// Whether the transformation would leave `input` as it is, decided
+    /// without building anything. Only a backslash starts an escape.
+    fn untouched(input: &str) -> bool {
+        !input.contains('\\')
+    }
+
+    fn full<'a>(input: &'a str) -> Cow<'a, str> {
         let mut result = String::new();
         let mut chars = input.chars().peekable();
         let mut modified = false;
@@ -318,6 +354,15 @@ impl Transformation for CssDecode {
             Cow::Borrowed(input)
         }
     }
+}
+
+impl Transformation for CssDecode {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if Self::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        Self::full(input)
+    }
 
     fn name(&self) -> &'static str {
         "cssDecode"
@@ -327,6 +372,31 @@ impl Transformation for CssDecode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shortcut of each transformation only ever answers for inputs the
+    /// full transformation leaves as they are, and it does answer for an
+    /// ordinary value.
+    #[test]
+    fn test_untouched_implies_unchanged() {
+        type Check = (&'static str, fn(&str) -> bool, fn(&str) -> Cow<'_, str>);
+        let checks: [Check; 3] = [
+            ("UrlDecodeUni", UrlDecodeUni::untouched, UrlDecodeUni::full),
+            ("JsDecode", JsDecode::untouched, JsDecode::full),
+            ("CssDecode", CssDecode::untouched, CssDecode::full),
+        ];
+        let inputs = crate::transformations::short_inputs();
+        for (name, untouched, full) in checks {
+            assert!(untouched("ordinaryvalue123"), "{name}");
+            let mut taken = 0;
+            for input in &inputs {
+                if untouched(input) {
+                    taken += 1;
+                    assert_eq!(full(input), input.as_str(), "{name} on {input:?}");
+                }
+            }
+            assert!(taken > 0, "{name}");
+        }
+    }
 
     #[test]
     fn test_url_decode() {

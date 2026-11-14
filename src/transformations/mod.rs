@@ -107,3 +107,30 @@ impl Transformation for Length {
         "length"
     }
 }
+
+/// Every string of up to four characters over the characters the
+/// transformations treat specially, plus a letter, a capital, a digit and a
+/// non-ASCII letter: what the shortcut of each transformation is checked
+/// against (`untouched` must imply that the full transformation changes
+/// nothing).
+#[cfg(test)]
+pub(crate) fn short_inputs() -> Vec<String> {
+    const ALPHABET: [char; 22] = [
+        'a', 'A', 'u', '4', '\u{e9}', '.', '/', '\\', '%', '+', ' ', '\t', '\u{b}', '*', '-', '#',
+        '"', '\'', '^', '(', ',', ';',
+    ];
+    let mut inputs = vec![String::new()];
+    let mut from = 0;
+    for _ in 0..4 {
+        let until = inputs.len();
+        for i in from..until {
+            for c in ALPHABET {
+                let mut longer = inputs[i].clone();
+                longer.push(c);
+                inputs.push(longer);
+            }
+        }
+        from = until;
+    }
+    inputs
+}
