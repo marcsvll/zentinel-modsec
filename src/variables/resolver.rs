@@ -5,7 +5,7 @@ use crate::parser::{Selection, VariableName, VariableSpec, XmlTarget};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 /// Compile a regex written in rule text (an `ARGS:/.../` selection or a
 /// `!ARGS:/.../` exclusion), once per pattern.
@@ -17,13 +17,19 @@ use std::sync::RwLock;
 ///
 /// Patterns come only from loaded rules, so the cache is bounded by the rule
 /// set. A pattern that does not compile is cached as `None` and never matches,
-/// as before. `Regex` clones share the compiled program.
-fn cached_regex(pattern: &str) -> Option<Regex> {
-    static CACHE: Lazy<RwLock<HashMap<String, Option<Regex>>>> = Lazy::new(Default::default);
+/// as before.
+///
+/// The compiled regex is handed out behind an `Arc`, not as a clone: a cloned
+/// `Regex` shares the program but starts with an empty pool of matcher state,
+/// so the first match on every clone builds that state again. With one clone
+/// per resolved key, a `!ARGS_NAMES:/.../` exclusion over a JSON body with two
+/// thousand keys cost 10 ms, nearly all of it building state to match one key.
+fn cached_regex(pattern: &str) -> Option<Arc<Regex>> {
+    static CACHE: Lazy<RwLock<HashMap<String, Option<Arc<Regex>>>>> = Lazy::new(Default::default);
     if let Some(hit) = CACHE.read().unwrap_or_else(|e| e.into_inner()).get(pattern) {
         return hit.clone();
     }
-    let compiled = Regex::new(pattern).ok();
+    let compiled = Regex::new(pattern).ok().map(Arc::new);
     CACHE
         .write()
         .unwrap_or_else(|e| e.into_inner())

@@ -140,6 +140,34 @@ fn each_chain_sees_its_own_result_for_the_same_value() {
 }
 
 #[test]
+fn an_exclusion_by_pattern_costs_no_allocation_per_name() {
+    // The shape of CRS's `SecRuleUpdateTargetById 930120 "!ARGS_NAMES:/.../"`.
+    let uri = uri(ARGUMENTS);
+    let excluding = "t:none";
+    let with = |rules: usize| {
+        let mut text = String::from("SecRuleEngine On\n");
+        for i in 0..rules {
+            text.push_str(&format!(
+                "SecRule ARGS_NAMES|!ARGS_NAMES:/^b\\d+$/ \"@streq never-{i}\" \
+                 \"id:{},phase:1,deny,{excluding}\"\n",
+                1000 + i
+            ));
+        }
+        let msc = ModSecurity::from_string(&text).expect("rules should load");
+        let mut tx = msc.new_transaction();
+        tx.process_uri(&uri, "GET", "HTTP/1.1").unwrap();
+        let before = ALLOCATIONS.with(Cell::get);
+        tx.process_request_headers().unwrap();
+        ALLOCATIONS.with(Cell::get) - before
+    };
+    let per_rule = (with(40) - with(20)) / 20;
+    assert!(
+        per_rule < ARGUMENTS as u64,
+        "each further rule with a pattern exclusion allocated {per_rule} times for {ARGUMENTS} names"
+    );
+}
+
+#[test]
 fn each_rule_keeps_its_own_exclusions() {
     // Rule 1 resolves ARGS for the phase and leaves `a` out; rule 2 does not.
     let rules = "SecRuleEngine On\n\
