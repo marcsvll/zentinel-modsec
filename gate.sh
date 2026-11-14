@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The engine's gate: what every commit pushed to this repository has passed.
 #
-#   ./gate.sh            format, clippy (deny warnings), the test suite, the fuzz targets' build
+#   ./gate.sh            format, clippy (deny warnings), the test suite, the fuzz targets' build,
+#                        and the detectors against the C libinjection (differential/)
 #
 # With a CRS checkout (CRS_DIR, or test-rules/crs) the corpus test runs too; without one
 # it is skipped and the gate says so. A pass is recorded for the commit's tree under
@@ -29,7 +30,21 @@ if cargo fuzz --version >/dev/null 2>&1; then
 else
   echo "==> fuzz targets: cargo-fuzz is not installed, not built"; fuzz=fuzz-not-built
 fi
+if [ -f differential/libinjection-c/.commit ]; then
+  echo "==> differential (the detectors against the C libinjection)"
+  ( cd differential
+    cargo fmt --check -- --config-path "$empty"
+    cargo clippy --all-targets -- -D warnings
+    if [ "$corpus" = with-corpus ]; then
+      DIFFERENTIAL_YAML_DIRS="$(cd .. && cd "$crs" && pwd)/tests/regression/tests" CRS_DIR="$(cd .. && cd "$crs" && pwd)" cargo test --release
+    else
+      cargo test --release
+    fi )
+  differential=differential-run
+else
+  echo "==> differential: no C libinjection (differential/fetch.sh), not run"; differential=differential-not-run
+fi
 mkdir -p .gate
 tree=$(git rev-parse 'HEAD^{tree}')
-echo "$(git rev-parse HEAD) $(date -u +%Y-%m-%dT%H:%M:%SZ) $corpus $fuzz" > ".gate/$tree.ok"
-echo "gate: passed and recorded for $(git rev-parse --short HEAD) ($corpus, $fuzz)"
+echo "$(git rev-parse HEAD) $(date -u +%Y-%m-%dT%H:%M:%SZ) $corpus $fuzz $differential" > ".gate/$tree.ok"
+echo "gate: passed and recorded for $(git rev-parse --short HEAD) ($corpus, $fuzz, $differential)"

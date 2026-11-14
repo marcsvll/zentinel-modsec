@@ -12,3 +12,10 @@ Cargo.lock
 /fuzz/artifacts
 /fuzz/Cargo.lock
 /.gate
+/differential/libinjection-c
+/differential/target
+/differential/Cargo.lock
+/differential/fuzz/target
+/differential/fuzz/corpus
+/differential/fuzz/artifacts
+/differential/fuzz/Cargo.lock

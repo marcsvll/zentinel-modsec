@@ -1,0 +1,26 @@
+[package]
+name = "zentinel-modsec-differential-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+description = "cargo-fuzz target: the engine's detectors against the C libinjection."
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+zentinel-modsec-differential = { path = ".." }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "differential"
+path = "fuzz_targets/differential.rs"
+test = false
+doc = false
+bench = false
+
+# Not a member of a workspace above it.
+[workspace]
