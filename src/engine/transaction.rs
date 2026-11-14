@@ -113,6 +113,28 @@ impl RuleOutcome {
     }
 }
 
+/// How many matches of one evaluation of a rule are kept in
+/// [`Transaction::matched_data`]: the first ones and, in the last place, the
+/// latest. `MATCHED_VARS` and the rule's `setvar`s still see every match.
+pub const MATCHED_DATA_PER_RULE: usize = 16;
+
+/// How many bytes of a matched value, and of the portion the operator hit, are
+/// kept in [`Transaction::matched_data`]. `MATCHED_VAR` holds the whole value.
+pub const MATCHED_DATA_VALUE_BYTES: usize = 2048;
+
+/// A value as the record of a match keeps it: whole when short, otherwise its
+/// first [`MATCHED_DATA_VALUE_BYTES`] bytes, cut at a character boundary.
+fn kept_for_the_record(value: &str) -> String {
+    if value.len() <= MATCHED_DATA_VALUE_BYTES {
+        return value.to_string();
+    }
+    let mut end = MATCHED_DATA_VALUE_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
 /// What a rule matched on.
 ///
 /// `matched_rules()` gives rule IDs, which says a rule fired but not why.
@@ -127,7 +149,7 @@ pub struct MatchedData {
     /// The variable's value, after transformations were applied.
     ///
     /// This is what `MATCHED_VAR` resolves to -- the whole value, not the
-    /// portion the operator hit.
+    /// portion the operator hit -- up to [`MATCHED_DATA_VALUE_BYTES`].
     pub value: String,
     /// The portion of the value the operator matched, when it reports one.
     ///
@@ -602,18 +624,28 @@ impl Transaction {
                         self.apply_setvar(op);
                     }
                 }
+                let recorded_before = self.matched_data.len();
                 for (var, caps) in &outcome.matches {
                     if has_capture(rule) {
                         self.store_captures(var.portion.clone(), caps);
                     }
                     self.matched_vars
                         .push((var.name.clone(), var.value.clone()));
-                    self.matched_data.push(MatchedData {
+                    let record = MatchedData {
                         rule_id: rule.id.clone(),
                         variable: var.name.clone(),
-                        value: var.value.clone(),
-                        matched_portion: var.portion.clone(),
-                    });
+                        value: kept_for_the_record(&var.value),
+                        matched_portion: var.portion.as_deref().map(kept_for_the_record),
+                    };
+                    // What is kept to explain a match is bounded: a rule that
+                    // matches every value of a large body would otherwise
+                    // leave a copy of the body behind, and the next rule
+                    // another. The first matches and the latest are kept.
+                    if self.matched_data.len() - recorded_before < MATCHED_DATA_PER_RULE {
+                        self.matched_data.push(record);
+                    } else if let Some(latest) = self.matched_data.last_mut() {
+                        *latest = record;
+                    }
                     for op in &setvar_ops {
                         self.apply_setvar(op);
                     }
