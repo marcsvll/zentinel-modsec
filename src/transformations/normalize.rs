@@ -538,9 +538,25 @@ impl Transformation for SqlHexDecode {
 pub struct Utf8ToUnicode;
 
 impl Transformation for Utf8ToUnicode {
+    /// Every character outside ASCII becomes `%uHHHH`, as in ModSecurity.
+    ///
+    /// The CRS always follows it with `t:urlDecodeUni`, which reads the
+    /// escape back and folds the full-width forms to ASCII on the way: that
+    /// pair is how `＜script＞` is seen as `<script>`. As a no-op, which this
+    /// was, the pair left full-width text untouched (S10).
     fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
-        // In Rust strings are already UTF-8, this is a no-op
-        Cow::Borrowed(input)
+        if input.is_ascii() {
+            return Cow::Borrowed(input);
+        }
+        let mut result = String::with_capacity(input.len() + 16);
+        for c in input.chars() {
+            if c.is_ascii() {
+                result.push(c);
+            } else {
+                result.push_str(&format!("%u{:04x}", c as u32));
+            }
+        }
+        Cow::Owned(result)
     }
 
     fn name(&self) -> &'static str {
@@ -780,6 +796,17 @@ impl Transformation for Sha256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_utf8_to_unicode_escapes_what_is_not_ascii() {
+        let t = Utf8ToUnicode;
+        assert_eq!(t.transform("plain ascii"), "plain ascii");
+        assert_eq!(t.transform("caf\u{e9}"), "caf%u00e9");
+        assert_eq!(t.transform("\u{ff1c}script\u{ff1e}"), "%uff1cscript%uff1e");
+        // Outside the BMP the escape is longer than four digits, and
+        // urlDecodeUni reads only four: as in ModSecurity.
+        assert_eq!(t.transform("\u{1f600}"), "%u1f600");
+    }
 
     /// The shortcut of each transformation only ever answers for inputs the
     /// full transformation leaves as they are, and it does answer for an

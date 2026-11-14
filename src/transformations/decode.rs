@@ -44,55 +44,56 @@ impl UrlDecodeUni {
         !input.contains(['%', '+'])
     }
 
+    /// Decode `%XX`, `%uXXXX` and `+`, as ModSecurity does.
+    ///
+    /// An escape that is not well formed is not an escape: the `%` is copied
+    /// and decoding goes on with the character after it, so `%u%27` is `%u'`
+    /// and `%%27` is `%'`. Only hexadecimal digits count as digits (no sign).
+    ///
+    /// `%uFF01` to `%uFF5E`, the full-width forms, decode to the ASCII
+    /// characters they stand for (ModSecurity adds 0x20 to the low byte), so
+    /// `%uFF1Cscript%uFF1E` is `<script>`: a backend that normalizes them sees
+    /// ASCII, and so must the rules.
     fn full<'a>(input: &'a str) -> Cow<'a, str> {
-        // Handle %uXXXX unicode escapes in addition to standard URL encoding
-        let mut result = String::new();
-        let mut chars = input.chars().peekable();
+        let chars: Vec<char> = input.chars().collect();
+        let mut result = String::with_capacity(input.len());
         let mut modified = false;
+        let mut i = 0;
 
-        while let Some(c) = chars.next() {
-            if c == '%' {
-                if chars.peek() == Some(&'u') || chars.peek() == Some(&'U') {
-                    chars.next(); // consume 'u'
-                                  // Read 4 hex digits
-                    let mut hex = String::new();
-                    for _ in 0..4 {
-                        if let Some(h) = chars.next() {
-                            hex.push(h);
-                        }
-                    }
-                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                        if let Some(decoded) = char::from_u32(code) {
-                            result.push(decoded);
-                            modified = true;
-                            continue;
-                        }
-                    }
-                    result.push('%');
-                    result.push('u');
-                    result.push_str(&hex);
-                } else {
-                    // Standard URL encoding
-                    let mut hex = String::new();
-                    for _ in 0..2 {
-                        if let Some(h) = chars.next() {
-                            hex.push(h);
-                        }
-                    }
-                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                        result.push(byte as char);
+        while i < chars.len() {
+            match chars[i] {
+                '%' => {
+                    let unicode = matches!(chars.get(i + 1), Some('u' | 'U'))
+                        .then(|| hex_digits(&chars[i + 2..], 4))
+                        .flatten()
+                        .and_then(|code| match code {
+                            0xff01..=0xff5e => char::from_u32(code - 0xff00 + 0x20),
+                            // A surrogate is not a character: left as written.
+                            _ => char::from_u32(code),
+                        });
+                    if let Some(decoded) = unicode {
+                        result.push(decoded);
                         modified = true;
+                        i += 6;
+                    } else if let Some(byte) = hex_digits(&chars[i + 1..], 2) {
+                        result.push(byte as u8 as char);
+                        modified = true;
+                        i += 3;
                     } else {
                         result.push('%');
-                        result.push_str(&hex);
+                        i += 1;
                     }
                 }
-            } else if c == '+' {
-                // An encoded space, as for urlDecode.
-                result.push(' ');
-                modified = true;
-            } else {
-                result.push(c);
+                '+' => {
+                    // An encoded space, as for urlDecode.
+                    result.push(' ');
+                    modified = true;
+                    i += 1;
+                }
+                c => {
+                    result.push(c);
+                    i += 1;
+                }
             }
         }
 
@@ -102,6 +103,15 @@ impl UrlDecodeUni {
             Cow::Borrowed(input)
         }
     }
+}
+
+/// The value of the first `count` characters read as hexadecimal digits, or
+/// `None` when there are fewer or one of them is not a digit.
+fn hex_digits(chars: &[char], count: usize) -> Option<u32> {
+    let digits = chars.get(..count)?;
+    digits
+        .iter()
+        .try_fold(0u32, |value, c| Some(value * 16 + c.to_digit(16)?))
 }
 
 impl Transformation for UrlDecodeUni {
@@ -424,6 +434,41 @@ mod tests {
             assert_eq!(t.transform("c$@at+/et$@c"), "c$@at /et$@c", "{}", t.name());
         }
         assert_eq!(UrlDecodeUni.transform("%u0041+b"), "A b");
+    }
+
+    #[test]
+    fn test_url_decode_uni_leaves_a_malformed_escape_and_goes_on() {
+        let t = UrlDecodeUni;
+        // The escape after a malformed one is still decoded (S11): these used
+        // to swallow the `%27` into the malformed escape and hide the quote.
+        assert_eq!(t.transform("%u%27"), "%u'");
+        assert_eq!(t.transform("%%27"), "%'");
+        assert_eq!(t.transform("%u00%27"), "%u00'");
+        assert_eq!(t.transform("%2%27"), "%2'");
+        // A sign is not a hexadecimal digit.
+        assert_eq!(t.transform("%+4"), "% 4");
+        assert_eq!(t.transform("%-4"), "%-4");
+        assert_eq!(t.transform("%u+041"), "%u 041");
+        // Cut short at the end of the input.
+        assert_eq!(t.transform("a%"), "a%");
+        assert_eq!(t.transform("a%4"), "a%4");
+        assert_eq!(t.transform("a%u004"), "a%u004");
+        // A surrogate is not a character; the escape stays as written.
+        assert_eq!(t.transform("%ud800"), "%ud800");
+        // Well-formed escapes, either case.
+        assert_eq!(t.transform("%41%u0042%U0043"), "ABC");
+        assert_eq!(t.transform("%u00e9"), "\u{e9}");
+        assert_eq!(t.transform("%e9"), "\u{e9}");
+    }
+
+    #[test]
+    fn test_url_decode_uni_folds_full_width_forms_to_ascii() {
+        let t = UrlDecodeUni;
+        assert_eq!(t.transform("%uFF1Cscript%uff1e"), "<script>");
+        assert_eq!(t.transform("%uff01%uff5e"), "!~");
+        // Outside the full-width block nothing is folded.
+        assert_eq!(t.transform("%uff00"), "\u{ff00}");
+        assert_eq!(t.transform("%uff5f"), "\u{ff5f}");
     }
 
     #[test]
