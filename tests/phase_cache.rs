@@ -230,3 +230,22 @@ fn a_later_phase_sees_what_arrived_after_the_earlier_one() {
     let denied = tx.intervention().expect("phase 2 sees the body");
     assert_eq!(denied.rule_ids.first().map(String::as_str), Some("2"));
 }
+
+#[test]
+fn past_the_budget_a_value_is_still_transformed_just_not_kept() {
+    // One argument of 3 MiB in upper case and several chains that each change
+    // it: more transformed text than a phase keeps. Every rule must still see
+    // its own chain's result.
+    let big = "A".repeat(3 * 1024 * 1024);
+    let rules = "SecRuleEngine On\n\
+        SecRule ARGS \"@rx ^a+$\" \"id:1,phase:1,pass,nolog,t:none,t:lowercase,setvar:tx.hits=+1\"\n\
+        SecRule ARGS \"@rx ^a+$\" \"id:2,phase:1,pass,nolog,t:none,t:lowercase,t:trim,setvar:tx.hits=+1\"\n\
+        SecRule ARGS \"@rx ^a+$\" \"id:3,phase:1,pass,nolog,t:none,t:trim,t:lowercase,setvar:tx.hits=+1\"\n\
+        SecRule ARGS \"@rx ^a+$\" \"id:4,phase:1,pass,nolog,t:none,t:lowercase,setvar:tx.hits=+1\"\n\
+        SecRule ARGS \"@rx ^A+$\" \"id:5,phase:1,pass,nolog,t:none,setvar:tx.hits=+1\"\n\
+        SecRule TX:hits \"@eq 5\" \"id:6,phase:1,deny,t:none\"";
+    assert_eq!(
+        denied_by(rules, &format!("/?a={big}")).as_deref(),
+        Some("6")
+    );
+}

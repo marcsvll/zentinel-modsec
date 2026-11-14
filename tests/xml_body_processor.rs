@@ -441,3 +441,32 @@ fn a_well_formed_document_reports_nothing() {
     assert!(in_text && in_attribute);
     assert!(!error);
 }
+
+#[test]
+fn a_declared_encoding_that_is_not_utf8_is_reported() {
+    // UTF-7 `<script>`: ASCII to this parser, markup to one that honours the
+    // declaration.
+    let body = b"<?xml version=\"1.0\" encoding=\"UTF-7\"?><a>+ADw-script+AD4-</a>";
+    let (in_text, _, error) = seen(body, "+ADw-script");
+    assert!(in_text, "the text is inspected as written");
+    assert!(error, "and the document is not fully understood");
+
+    let utf8 = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><a>evil-marker</a>";
+    let (in_text, _, error) = seen(utf8, "evil-marker");
+    assert!(in_text);
+    assert!(!error, "UTF-8 is what the parser reads");
+}
+
+#[test]
+fn a_doctype_with_an_internal_subset_is_reported() {
+    // A default attribute value: the application sees an attribute this
+    // parser never builds.
+    let body = b"<!DOCTYPE a [<!ATTLIST a b CDATA \"evil-marker\">]><a>text</a>";
+    let (_, _, error) = seen(body, "evil-marker");
+    assert!(error);
+
+    let plain = b"<!DOCTYPE a><a>evil-marker</a>";
+    let (in_text, _, error) = seen(plain, "evil-marker");
+    assert!(in_text);
+    assert!(!error, "a DOCTYPE that declares nothing changes nothing");
+}

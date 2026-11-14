@@ -52,19 +52,29 @@ type Chains = Vec<(u32, Option<Box<str>>)>;
 pub(crate) struct Transformed {
     /// Per slot, per value: the chains applied so far.
     by_slot: Vec<Vec<Chains>>,
+    /// Bytes of transformed text kept so far.
+    kept_bytes: usize,
 }
+
+/// How much transformed text one phase keeps. A value that every chain changes
+/// is kept once per chain, so a large body full of escapes would otherwise be
+/// held a dozen times over for the length of the phase, per request in flight.
+/// Past the budget a value is transformed for the rule that asks and not kept,
+/// which is what every rule did before there was a cache.
+const TRANSFORMED_BUDGET_BYTES: usize = 4 * 1024 * 1024;
 
 impl Transformed {
     /// `value`, which is the resolved value at `at`, through `pipeline`:
-    /// transformed the first time, read back after that.
+    /// transformed the first time, read back after that (while the budget
+    /// lasts; see [`TRANSFORMED_BUDGET_BYTES`]).
     pub(crate) fn apply<'a>(
         &'a mut self,
         at: ValueAt,
         pipeline: &TransformationPipeline,
         value: &'a str,
-    ) -> &'a str {
+    ) -> Cow<'a, str> {
         if pipeline.is_empty() {
-            return value;
+            return Cow::Borrowed(value);
         }
         let (slot, item) = at;
         if self.by_slot.len() <= slot {
@@ -85,13 +95,19 @@ impl Transformed {
                     {
                         None
                     }
-                    other => Some(other.into_owned().into_boxed_str()),
+                    other => {
+                        if self.kept_bytes + other.len() > TRANSFORMED_BUDGET_BYTES {
+                            return Cow::Owned(other.into_owned());
+                        }
+                        self.kept_bytes += other.len();
+                        Some(other.into_owned().into_boxed_str())
+                    }
                 };
                 chains.push((key, result));
                 chains.len() - 1
             }
         };
-        chains[found].1.as_deref().unwrap_or(value)
+        Cow::Borrowed(chains[found].1.as_deref().unwrap_or(value))
     }
 }
 

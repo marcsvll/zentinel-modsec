@@ -737,7 +737,36 @@ fn read_xml(body: &[u8], attributes: &mut Vec<String>, text: &mut String) -> Res
                     }
                 }
             }
+            Ok(Event::Decl(e)) => {
+                // The text is read as UTF-8. A document that declares another
+                // encoding may mean something else to a parser that honours
+                // the declaration (`+ADw-script+AD4-` is `<script>` in UTF-7).
+                if let Some(Ok(encoding)) = e.encoding() {
+                    let name = String::from_utf8_lossy(&encoding).to_ascii_lowercase();
+                    if !matches!(name.as_str(), "utf-8" | "utf8" | "us-ascii" | "ascii") {
+                        not_understood.get_or_insert_with(|| {
+                            format!(
+                                "XML body declares the encoding '{name}', which is not \
+                                 decoded; it was inspected as UTF-8"
+                            )
+                        });
+                    }
+                }
+            }
+            Ok(Event::DocType(e)) => {
+                // An internal subset can give attributes default values and
+                // declare entities: content the application's parser sees and
+                // this one does not build.
+                if e.as_ref().contains(&b'[') {
+                    not_understood.get_or_insert_with(|| {
+                        "XML body has a DOCTYPE with an internal subset, which is not \
+                         processed; what it declares was not inspected"
+                            .to_string()
+                    });
+                }
+            }
             Ok(Event::Eof) => break,
+            // Comments and processing instructions carry no value to inspect.
             Ok(_) => {}
             Err(e) => return Err(format!("XML parsing error: {e}")),
         }
@@ -825,7 +854,9 @@ fn form_decode_checked(component: &str) -> (String, bool) {
 }
 
 /// Most fields of one kind collected from a request: arguments (query string,
-/// urlencoded body and multipart parts together) and cookies.
+/// urlencoded body and multipart parts together) and cookies. The JSON and XML
+/// processors count their own values against their own caps, on top of the
+/// query string's.
 ///
 /// `a&a&a...` is two bytes per argument, and every argument is tested by every
 /// rule over `ARGS`: without a bound, a body of a few hundred kilobytes buys

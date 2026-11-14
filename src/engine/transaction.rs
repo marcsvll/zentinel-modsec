@@ -1035,7 +1035,7 @@ impl Transaction {
             } else {
                 whole = [match (at, &value) {
                     (Some(at), Cow::Borrowed(shared)) => {
-                        Cow::Borrowed(transformed.apply(at, &rule.transformations, shared))
+                        transformed.apply(at, &rule.transformations, shared)
                     }
                     _ => rule.transformations.apply(&value),
                 }];
