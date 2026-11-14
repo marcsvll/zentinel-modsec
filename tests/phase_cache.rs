@@ -1,6 +1,8 @@
-//! A phase resolves a request variable once and its rules share the result.
+//! A phase resolves a request variable once, transforms each of its values
+//! once per distinct chain of transformations, and its rules share the result.
 //! What must not be shared is not: each rule's own exclusions, the targets a
-//! `ctl` removed, and the variables rules write to while the phase runs.
+//! `ctl` removed, the variables rules write to while the phase runs, and what
+//! a different chain makes of the same value.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -56,19 +58,19 @@ fn denied_by(rules: &str, uri: &str) -> Option<String> {
         .map(|i| i.rule_ids.first().cloned().unwrap_or_default())
 }
 
-/// Allocations of the request-headers phase with `rules` rules over ARGS, none
-/// of which matches.
-fn allocations_with(rules: usize) -> u64 {
+/// Allocations of the request-headers phase with `rules` rules over ARGS, all
+/// with the same `transformations`, none of which matches.
+fn allocations_with(rules: usize, transformations: &str, uri: &str) -> u64 {
     let mut text = String::from("SecRuleEngine On\n");
     for i in 0..rules {
         text.push_str(&format!(
-            "SecRule ARGS \"@streq never-{i}\" \"id:{},phase:1,deny,t:none\"\n",
+            "SecRule ARGS \"@streq never-{i}\" \"id:{},phase:1,deny,{transformations}\"\n",
             1000 + i
         ));
     }
     let msc = ModSecurity::from_string(&text).expect("rules should load");
     let mut tx = msc.new_transaction();
-    tx.process_uri(&uri(ARGUMENTS), "GET", "HTTP/1.1").unwrap();
+    tx.process_uri(uri, "GET", "HTTP/1.1").unwrap();
 
     let before = ALLOCATIONS.with(Cell::get);
     tx.process_request_headers().unwrap();
@@ -80,12 +82,60 @@ fn allocations_with(rules: usize) -> u64 {
 
 #[test]
 fn a_second_rule_over_the_same_variable_does_not_resolve_it_again() {
-    let per_rule = (allocations_with(40) - allocations_with(20)) / 20;
+    let uri = uri(ARGUMENTS);
+    let per_rule =
+        (allocations_with(40, "t:none", &uri) - allocations_with(20, "t:none", &uri)) / 20;
     // Resolving ARGS again would cost two allocations per argument (its name
     // and its value) on top of what testing the values costs.
     assert!(
         per_rule < 3 * ARGUMENTS as u64,
         "each further rule over ARGS allocated {per_rule} times for {ARGUMENTS} arguments"
+    );
+}
+
+#[test]
+fn a_second_rule_with_the_same_chain_does_not_transform_the_values_again() {
+    // Upper case, so that t:lowercase has to build a new string for each.
+    let uri = uri(ARGUMENTS).to_uppercase().replace("/?", "/?x=1&");
+    let chain = "t:none,t:urlDecodeUni,t:lowercase";
+    let per_rule = (allocations_with(40, chain, &uri) - allocations_with(20, chain, &uri)) / 20;
+    // Transforming again would cost at least one allocation per argument.
+    assert!(
+        per_rule < ARGUMENTS as u64 / 2,
+        "each further rule with the same chain allocated {per_rule} times for {ARGUMENTS} arguments"
+    );
+}
+
+#[test]
+fn each_chain_sees_its_own_result_for_the_same_value() {
+    // The chain that changes the value runs second: it must not be answered
+    // with the untouched value the first rule tested.
+    let rules = "SecRuleEngine On\n\
+        SecRule ARGS \"@streq attack\" \"id:1,phase:1,deny,t:none\"\n\
+        SecRule ARGS \"@streq attack\" \"id:2,phase:1,deny,t:none,t:lowercase\"";
+    assert_eq!(denied_by(rules, "/?a=ATTACK").as_deref(), Some("2"));
+    assert_eq!(denied_by(rules, "/?a=attack").as_deref(), Some("1"));
+
+    // And the other way around: the untouched value after the changed one.
+    let rules = "SecRuleEngine On\n\
+        SecRule ARGS \"@streq ATTACK\" \"id:1,phase:1,deny,t:none,t:lowercase\"\n\
+        SecRule ARGS \"@streq ATTACK\" \"id:2,phase:1,deny,t:none\"";
+    assert_eq!(denied_by(rules, "/?a=ATTACK").as_deref(), Some("2"));
+
+    // The same transformations in another order are another chain.
+    let rules = "SecRuleEngine On\n\
+        SecRule ARGS \"@streq %41\" \"id:1,phase:1,deny,t:none,t:urlDecodeUni,t:urlEncode\"\n\
+        SecRule ARGS \"@streq %41\" \"id:2,phase:1,deny,t:none,t:urlEncode,t:urlDecodeUni\"";
+    assert_eq!(denied_by(rules, "/?a=%2541").as_deref(), Some("2"));
+
+    // Two arguments with the same value in one variable, and the same value in
+    // two variables: each is tested, under its own name.
+    let rules = "SecRuleEngine On\n\
+        SecRule ARGS_NAMES|ARGS \"@streq attack\" \"id:1,phase:1,pass,nolog,t:none,t:lowercase,setvar:tx.hits=+1\"\n\
+        SecRule TX:hits \"@eq 3\" \"id:2,phase:1,deny,t:none\"";
+    assert_eq!(
+        denied_by(rules, "/?ATTACK=Attack&b=ATTACK").as_deref(),
+        Some("2")
     );
 }
 

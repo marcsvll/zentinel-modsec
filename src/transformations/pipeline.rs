@@ -2,13 +2,31 @@
 
 use super::{create_transformation, Transformation};
 use crate::error::Result;
+use once_cell::sync::Lazy;
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+/// A number for a chain of transformations: the same transformations in the
+/// same order get the same number, whichever rule they were written in.
+///
+/// It lets a result be kept under "this value, through this chain" without
+/// comparing chains. The table grows only when rules are loaded, by one entry
+/// per distinct chain.
+fn chain_key(transformations: &[Arc<dyn Transformation>]) -> u32 {
+    static KEYS: Lazy<Mutex<HashMap<Vec<&'static str>, u32>>> = Lazy::new(Default::default);
+    let names: Vec<&'static str> = transformations.iter().map(|t| t.name()).collect();
+    let mut keys = KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    let next = keys.len() as u32;
+    *keys.entry(names).or_insert(next)
+}
 
 /// A pipeline of transformations to apply in sequence.
 #[derive(Clone)]
 pub struct TransformationPipeline {
     transformations: Vec<Arc<dyn Transformation>>,
+    /// See [`chain_key`].
+    key: u32,
 }
 
 impl TransformationPipeline {
@@ -16,6 +34,7 @@ impl TransformationPipeline {
     pub fn new() -> Self {
         Self {
             transformations: Vec::new(),
+            key: chain_key(&[]),
         }
     }
 
@@ -34,12 +53,23 @@ impl TransformationPipeline {
             transformations.push(t);
         }
 
-        Ok(Self { transformations })
+        let key = chain_key(&transformations);
+        Ok(Self {
+            transformations,
+            key,
+        })
     }
 
     /// Add a transformation to the pipeline.
     pub fn add(&mut self, transformation: Arc<dyn Transformation>) {
         self.transformations.push(transformation);
+        self.key = chain_key(&self.transformations);
+    }
+
+    /// A number shared by every pipeline with the same transformations in the
+    /// same order, and by no other.
+    pub fn chain_key(&self) -> u32 {
+        self.key
     }
 
     /// Apply all transformations in sequence.
@@ -136,6 +166,30 @@ mod tests {
             TransformationPipeline::from_names(&["urlDecode".to_string(), "lowercase".to_string()])
                 .unwrap();
         assert_eq!(pipeline.apply("HELLO%20WORLD"), "hello world");
+    }
+
+    #[test]
+    fn test_chain_key_follows_the_transformations_and_their_order() {
+        let chain = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            TransformationPipeline::from_names(&names)
+                .unwrap()
+                .chain_key()
+        };
+        assert_eq!(
+            chain(&["urlDecodeUni", "lowercase"]),
+            chain(&["none", "URLDECODEUNI", "lowercase"])
+        );
+        assert_ne!(
+            chain(&["urlDecodeUni", "lowercase"]),
+            chain(&["lowercase", "urlDecodeUni"])
+        );
+        assert_ne!(chain(&["lowercase"]), chain(&["urlDecodeUni", "lowercase"]));
+        assert_eq!(chain(&["none"]), TransformationPipeline::new().chain_key());
+
+        let mut built = TransformationPipeline::new();
+        built.add(create_transformation("lowercase").unwrap());
+        assert_eq!(built.chain_key(), chain(&["lowercase"]));
     }
 
     #[test]

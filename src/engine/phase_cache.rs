@@ -5,9 +5,14 @@
 //! never to the request. CRS tests the same collections (`ARGS`,
 //! `REQUEST_COOKIES`, `REQUEST_HEADERS`, ...) in rule after rule, so the values
 //! are resolved the first time a rule of the phase asks and borrowed after
-//! that. The cache lives for one phase and is dropped with it.
+//! that. The same goes for what a transformation chain makes of each value: a
+//! handful of chains (`t:none,t:urlDecodeUni`, ...) account for most rules.
+//! The cache lives for one phase and is dropped with it.
+
+use std::borrow::Cow;
 
 use crate::parser::{Selection, VariableName, VariableSpec};
+use crate::transformations::TransformationPipeline;
 use crate::variables::VariableResolver;
 
 /// One variable, as selected, resolved against the request or the response.
@@ -18,13 +23,79 @@ struct Entry {
     values: Vec<(String, String)>,
 }
 
-/// The variables resolved so far in the phase that is running.
+/// What the phase that is running has worked out so far.
+///
+/// Two parts, so that a rule can hold the resolved values while it adds to
+/// the transformed ones.
 #[derive(Default)]
 pub(crate) struct PhaseCache {
+    pub(crate) resolved: Resolved,
+    pub(crate) transformed: Transformed,
+}
+
+/// The variables resolved so far.
+#[derive(Default)]
+pub(crate) struct Resolved {
     entries: Vec<Entry>,
 }
 
-impl PhaseCache {
+/// A resolved value: the slot of its variable and its position there.
+pub(crate) type ValueAt = (usize, usize);
+
+/// What the chains applied so far made of one value, by
+/// [`TransformationPipeline::chain_key`]. `None` is a chain that left the value
+/// as it was, which is not copied.
+type Chains = Vec<(u32, Option<Box<str>>)>;
+
+/// What each transformation chain made of each resolved value.
+#[derive(Default)]
+pub(crate) struct Transformed {
+    /// Per slot, per value: the chains applied so far.
+    by_slot: Vec<Vec<Chains>>,
+}
+
+impl Transformed {
+    /// `value`, which is the resolved value at `at`, through `pipeline`:
+    /// transformed the first time, read back after that.
+    pub(crate) fn apply<'a>(
+        &'a mut self,
+        at: ValueAt,
+        pipeline: &TransformationPipeline,
+        value: &'a str,
+    ) -> &'a str {
+        if pipeline.is_empty() {
+            return value;
+        }
+        let (slot, item) = at;
+        if self.by_slot.len() <= slot {
+            self.by_slot.resize_with(slot + 1, Vec::new);
+        }
+        let values = &mut self.by_slot[slot];
+        if values.len() <= item {
+            values.resize_with(item + 1, Vec::new);
+        }
+        let chains = &mut values[item];
+        let key = pipeline.chain_key();
+        let found = match chains.iter().position(|(k, _)| *k == key) {
+            Some(found) => found,
+            None => {
+                let result = match pipeline.apply(value) {
+                    Cow::Borrowed(same)
+                        if same.len() == value.len() && same.as_ptr() == value.as_ptr() =>
+                    {
+                        None
+                    }
+                    other => Some(other.into_owned().into_boxed_str()),
+                };
+                chains.push((key, result));
+                chains.len() - 1
+            }
+        };
+        chains[found].1.as_deref().unwrap_or(value)
+    }
+}
+
+impl Resolved {
     /// Where this spec's values are kept, resolving them on first use.
     ///
     /// `None` when the variable can change while the phase runs (`TX`,

@@ -8,7 +8,7 @@ use super::chain::ChainState;
 use super::control::{CtlDirective, TransactionControls};
 use super::intervention::Intervention;
 use super::phase::Phase;
-use super::phase_cache::PhaseCache;
+use super::phase_cache::{PhaseCache, Resolved, ValueAt};
 use super::profile::{nanos, Profile, RuleProfile};
 use super::ruleset::{CompiledRule, CompiledRuleset, RuleEngineMode};
 use super::scoring::AnomalyScore;
@@ -822,15 +822,20 @@ impl Transaction {
         let slots: Vec<Option<usize>> = rule
             .variables
             .iter()
-            .map(|spec| cache.slot(&resolver, spec))
+            .map(|spec| cache.resolved.slot(&resolver, spec))
             .collect();
-        let cache: &PhaseCache = cache;
+        let PhaseCache {
+            resolved,
+            transformed,
+        } = cache;
+        let resolved_values: &Resolved = resolved;
 
-        let mut all_values: Vec<(Cow<'_, str>, Cow<'_, str>)> = Vec::new();
+        // Name, value and, for a value shared by the phase, where it is kept.
+        let mut all_values: Vec<(Cow<'_, str>, Cow<'_, str>, Option<ValueAt>)> = Vec::new();
         let mut any_excluded = false;
         for (spec, slot) in rule.variables.iter().zip(slots) {
             let resolved: Cow<'_, [(String, String)]> = match slot {
-                Some(slot) => Cow::Borrowed(cache.values(slot)),
+                Some(slot) => Cow::Borrowed(resolved_values.values(slot)),
                 None => Cow::Owned(resolver.resolve_unfiltered(spec)),
             };
             let mut count = 0usize;
@@ -852,16 +857,20 @@ impl Transaction {
             };
             match resolved {
                 Cow::Borrowed(values) => {
-                    for (name, value) in values {
+                    for (item, (name, value)) in values.iter().enumerate() {
                         if keep(name) {
-                            all_values.push((Cow::Borrowed(name), Cow::Borrowed(value)));
+                            all_values.push((
+                                Cow::Borrowed(name),
+                                Cow::Borrowed(value),
+                                slot.map(|slot| (slot, item)),
+                            ));
                         }
                     }
                 }
                 Cow::Owned(values) => {
                     for (name, value) in values {
                         if keep(&name) {
-                            all_values.push((Cow::Owned(name), Cow::Owned(value)));
+                            all_values.push((Cow::Owned(name), Cow::Owned(value), None));
                         }
                     }
                 }
@@ -872,6 +881,7 @@ impl Transaction {
                 all_values.push((
                     Cow::Owned(format!("&{:?}", spec.name)),
                     Cow::Owned(count.to_string()),
+                    None,
                 ));
             }
         }
@@ -954,7 +964,7 @@ impl Transaction {
         // @validateUtf8Encoding reports (CRS 920250).
         let utf8_validator = matches!(rule.operator_spec.name, OperatorName::ValidateUtf8Encoding);
         let mut matches: Vec<(MatchedVariable, Vec<String>)> = Vec::new();
-        for (name, value) in all_values {
+        for (name, value, at) in all_values {
             if utf8_validator && self.request.has_invalid_utf8(&name) {
                 if !rule.operator_negated {
                     matches.push((
@@ -969,17 +979,34 @@ impl Transaction {
                 continue;
             }
             let transform_start = timing.is_some().then(Instant::now);
-            let candidates: Vec<String> = if multi_match {
-                rule.transformations.apply_steps(&value)
+            // What the operator runs against: every step with `multiMatch`,
+            // otherwise the value through the whole chain. A value the phase
+            // shares is transformed once per distinct chain, not once per rule.
+            let steps: Vec<Cow<'_, str>>;
+            let whole: [Cow<'_, str>; 1];
+            let candidates: &[Cow<'_, str>] = if multi_match {
+                steps = rule
+                    .transformations
+                    .apply_steps(&value)
+                    .into_iter()
+                    .map(Cow::Owned)
+                    .collect();
+                &steps
             } else {
-                vec![rule.transformations.apply(&value).into_owned()]
+                whole = [match (at, &value) {
+                    (Some(at), Cow::Borrowed(shared)) => {
+                        Cow::Borrowed(transformed.apply(at, &rule.transformations, shared))
+                    }
+                    _ => rule.transformations.apply(&value),
+                }];
+                &whole
             };
             if let (Some(t), Some(start)) = (timing.as_deref_mut(), transform_start) {
                 t.transform_ns += nanos(start.elapsed());
             }
-            for transformed in candidates {
+            for candidate in candidates {
                 let operator_start = timing.is_some().then(Instant::now);
-                let result = operator.execute(&transformed);
+                let result = operator.execute(candidate);
                 if let (Some(t), Some(start)) = (timing.as_deref_mut(), operator_start) {
                     t.operator_ns += nanos(start.elapsed());
                 }
@@ -998,7 +1025,7 @@ impl Transaction {
                         // reported separately, since an audit log wants both:
                         // the value to judge the match, the portion to see what
                         // triggered it.
-                        value: transformed,
+                        value: candidate.to_string(),
                         portion: result.matched_value,
                     };
                     matches.push((matched, result.captures));
