@@ -1,6 +1,6 @@
 [package]
 name = "zentinel-modsec"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 rust-version = "1.94.1"
 authors = ["Zentinel Contributors"]
@@ -58,7 +58,7 @@ quick-xml = "0.41"
 # (BSD-3-Clause, no unsafe, no I/O), pinned by commit: a change there changes what is
 # detected, so it is a commit of its own here, measured against the C library
 # (differential/) and the CRS corpus.
-libinjectionrs = { git = "https://github.com/marcsvll/libinjectionrs", rev = "3ef8fc93cab70e0927c8a53555b97004807685a8", version = "=0.2.0" }
+libinjectionrs = { git = "https://github.com/marcsvll/libinjectionrs", rev = "191d679bb93649c024955488b89cfc47c2375268", version = "=0.2.1" }
 
 # URL encoding/decoding
 percent-encoding = "2.3"
