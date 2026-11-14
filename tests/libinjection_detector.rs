@@ -67,3 +67,22 @@ fn xss_is_reported() {
         assert!(xss(value), "{value:?} was not reported");
     }
 }
+
+#[test]
+fn what_the_translation_missed_and_the_c_library_reports() {
+    // Found by differential/: keywords of three words, and INTO OUTFILE in
+    // lower case. The fingerprints are the C library's.
+    for (value, fingerprint) in [
+        ("1' IN BOOLEAN MODE) AND 1", "sk)&1"),
+        ("1 LOCK IN SHARE MODE UNION SELECT 1", "1kUE1"),
+        ("1; CREATE OR REPLACE FUNCTION SLEEP(int)", "1;Tkf"),
+        ("1 into outfile 'a'", "1ks"),
+    ] {
+        let result = DetectSqliOperator.execute(value);
+        assert_eq!(
+            result.matched_value.as_deref(),
+            Some(fingerprint),
+            "{value:?}"
+        );
+    }
+}

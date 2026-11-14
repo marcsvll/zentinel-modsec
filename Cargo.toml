@@ -53,11 +53,12 @@ serde_json = "1.0"
 # XXE and entity-expansion attacks are not reachable through it.
 quick-xml = "0.41"
 
-# @detectSQLi and @detectXSS: a Rust port of libinjection (BSD-3-Clause, no unsafe,
-# no I/O). The CRS assumes libinjection's verdicts and fingerprints. Pinned to an
-# exact version: an upgrade changes what is detected, so it is a commit of its own,
-# measured against the CRS corpus.
-libinjectionrs = "=0.1.1"
+# @detectSQLi and @detectXSS: libinjection in Rust. The CRS assumes libinjection's
+# verdicts and fingerprints. The project's fork of the libinjectionrs port
+# (BSD-3-Clause, no unsafe, no I/O), pinned by commit: a change there changes what is
+# detected, so it is a commit of its own here, measured against the C library
+# (differential/) and the CRS corpus.
+libinjectionrs = { git = "https://github.com/marcsvll/libinjectionrs", rev = "3ef8fc93cab70e0927c8a53555b97004807685a8", version = "=0.2.0" }
 
 # URL encoding/decoding
 percent-encoding = "2.3"

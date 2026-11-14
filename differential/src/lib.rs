@@ -64,42 +64,12 @@ pub fn engine(value: &str) -> Verdict {
     }
 }
 
-/// Multi-word entries of libinjection's keyword table that exist only so a
-/// longer keyword can be assembled from them ("IN BOOLEAN" for "IN BOOLEAN
-/// MODE"): the table gives them the type of a plain word.
-const STEPPING_STONES: &[&[&str]] = &[
-    &["AT", "TIME"],
-    &["CREATE", "OR"],
-    &["IN", "BOOLEAN"],
-    &["IS", "DISTINCT"],
-    &["IS", "NOT", "DISTINCT"],
-    &["LOCK", "IN"],
-    &["LOCK", "IN", "SHARE"],
-    &["NEXT", "VALUE"],
-    &["PREVIOUS", "VALUE"],
-];
-
 /// A disagreement that is understood: the name of its cause in `README.md`,
 /// when the value has what triggers one. A disagreement with no cause is a
 /// finding.
 pub fn known_cause(value: &str, ours: &Verdict, theirs: &Verdict) -> Option<&'static str> {
     if ours.sqli != theirs.sqli {
-        let words: Vec<String> = value
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .filter(|w| !w.is_empty())
-            .map(str::to_ascii_uppercase)
-            .collect();
-        let has = |phrase: &[&str]| words.windows(phrase.len()).any(|w| w == phrase);
-        if STEPPING_STONES.iter().any(|phrase| has(phrase)) {
-            return Some("three-word keywords");
-        }
         let lower = value.to_ascii_lowercase();
-        let into_not_upper = lower
-            .match_indices("into")
-            .any(|(at, _)| &value[at..at + 4] != "INTO");
-        if into_not_upper {
-            return Some("INTO compared with its case");
-        }
         let sp_password_not_lower = lower
             .match_indices("sp_password")
             .any(|(at, word)| value[at..at + word.len()] != *word);

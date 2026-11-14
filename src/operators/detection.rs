@@ -1,8 +1,9 @@
 //! Detection operators (@detectSQLi, @detectXSS).
 //!
-//! Both are libinjection, through its Rust port `libinjectionrs`: the CRS is
-//! written against libinjection's verdicts, so anything else here is a source
-//! of false positives and misses.
+//! Both are libinjection, through the project's fork of its Rust port
+//! `libinjectionrs`: the CRS is written against libinjection's verdicts, so
+//! anything else here is a source of false positives and misses. `differential/`
+//! compares the two.
 
 use super::traits::{Operator, OperatorResult};
 
