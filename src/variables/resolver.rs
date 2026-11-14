@@ -67,7 +67,7 @@ impl<'a> VariableResolver<'a> {
 
     /// Resolve a variable specification to values.
     pub fn resolve(&self, spec: &VariableSpec) -> Vec<(String, String)> {
-        let values = self.resolve_variable(spec.name, &spec.selection);
+        let values = self.resolve_unfiltered(spec);
 
         // Apply exclusions
         if spec.exclusions.is_empty() {
@@ -75,9 +75,15 @@ impl<'a> VariableResolver<'a> {
         } else {
             values
                 .into_iter()
-                .filter(|(k, _)| !spec.exclusions.iter().any(|e| exclusion_matches(k, e)))
+                .filter(|(k, _)| !is_excluded(spec, k))
                 .collect()
         }
+    }
+
+    /// The values a specification selects, before its exclusions
+    /// (`!ARGS:x`): what rules naming the same variable have in common.
+    pub(crate) fn resolve_unfiltered(&self, spec: &VariableSpec) -> Vec<(String, String)> {
+        self.resolve_variable(spec.name, &spec.selection)
     }
 
     /// Resolve a variable by name.
@@ -576,6 +582,12 @@ impl<'a> VariableResolver<'a> {
                 .collect(),
         }
     }
+}
+
+/// Whether a resolved variable key (e.g. `ARGS:password`) is left out by one of
+/// the specification's own exclusions.
+pub(crate) fn is_excluded(spec: &VariableSpec, key: &str) -> bool {
+    spec.exclusions.iter().any(|e| exclusion_matches(key, e))
 }
 
 /// Check whether a resolved variable key (e.g. `ARGS:password`) is excluded by

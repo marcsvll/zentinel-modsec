@@ -19,7 +19,7 @@ pub struct VariableSpec {
 }
 
 /// Selection mode for collection variables.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selection {
     /// Static key selection (ARGS:foo).
     Key(String),

@@ -1,5 +1,6 @@
 //! Transaction processing for ModSecurity.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,6 +8,7 @@ use super::chain::ChainState;
 use super::control::{CtlDirective, TransactionControls};
 use super::intervention::Intervention;
 use super::phase::Phase;
+use super::phase_cache::PhaseCache;
 use super::profile::{nanos, Profile, RuleProfile};
 use super::ruleset::{CompiledRule, CompiledRuleset, RuleEngineMode};
 use super::scoring::AnomalyScore;
@@ -17,7 +19,8 @@ use crate::error::Result;
 use crate::operators::{compile_operator, Operator};
 use crate::parser::{Action, DataAction, FlowAction, OperatorName, OperatorSpec};
 use crate::variables::{
-    Collection, MutableCollection, RequestData, ResponseData, TxCollection, VariableResolver,
+    is_excluded, Collection, MutableCollection, RequestData, ResponseData, TxCollection,
+    VariableResolver,
 };
 
 /// Whether a lowercased Content-Type denotes a JSON body.
@@ -475,6 +478,9 @@ impl Transaction {
 
     fn run_phase_rules(&mut self, phase: Phase, rules: &[CompiledRule]) -> Result<()> {
         let mut chain_state = ChainState::new();
+        // What the rules of this phase resolve from the request is resolved
+        // once and shared between them.
+        let mut cache = PhaseCache::default();
         // A chain is one logical rule: the starter's actions fire only when
         // every link matches, so they are held here until the chain completes.
         let mut pending_chain_actions: Option<ActionResult> = None;
@@ -559,7 +565,7 @@ impl Transaction {
             let outcome = if self.profile.is_some() {
                 let mut timing = RuleProfile::default();
                 let start = Instant::now();
-                let outcome = self.evaluate_rule(rule, Some(&mut timing));
+                let outcome = self.evaluate_rule(rule, &mut cache, Some(&mut timing));
                 timing.total_ns = nanos(start.elapsed());
                 timing.evaluations = 1;
                 if let Some(profile) = self.profile.as_mut() {
@@ -567,7 +573,7 @@ impl Transaction {
                 }
                 outcome?
             } else {
-                self.evaluate_rule(rule, None)?
+                self.evaluate_rule(rule, &mut cache, None)?
             };
             let matched = outcome.matched;
             let captures = outcome.captures;
@@ -778,6 +784,7 @@ impl Transaction {
     fn evaluate_rule(
         &self,
         rule: &CompiledRule,
+        cache: &mut PhaseCache,
         mut timing: Option<&mut RuleProfile>,
     ) -> Result<RuleOutcome> {
         let resolve_start = timing.is_some().then(Instant::now);
@@ -809,25 +816,63 @@ impl Transaction {
             .controls
             .has_target_removals(rule.id.as_deref(), &rule.tags);
 
-        let mut all_values = Vec::new();
+        // The request does not change during a phase, so what a spec selects
+        // from it is resolved once per phase and borrowed here (see
+        // `PhaseCache`); TX and the matched variables are resolved every time.
+        let slots: Vec<Option<usize>> = rule
+            .variables
+            .iter()
+            .map(|spec| cache.slot(&resolver, spec))
+            .collect();
+        let cache: &PhaseCache = cache;
+
+        let mut all_values: Vec<(Cow<'_, str>, Cow<'_, str>)> = Vec::new();
         let mut any_excluded = false;
-        for spec in &rule.variables {
-            let mut resolved = resolver.resolve(spec);
-            if filter_targets {
-                let before = resolved.len();
-                resolved.retain(|(name, _)| {
-                    !self
+        for (spec, slot) in rule.variables.iter().zip(slots) {
+            let resolved: Cow<'_, [(String, String)]> = match slot {
+                Some(slot) => Cow::Borrowed(cache.values(slot)),
+                None => Cow::Owned(resolver.resolve_unfiltered(spec)),
+            };
+            let mut count = 0usize;
+            let mut keep = |name: &str| {
+                if !spec.exclusions.is_empty() && is_excluded(spec, name) {
+                    return false;
+                }
+                if filter_targets
+                    && self
                         .controls
                         .is_target_removed(rule.id.as_deref(), &rule.tags, spec, name)
-                });
-                any_excluded |= resolved.len() != before;
+                {
+                    any_excluded = true;
+                    return false;
+                }
+                count += 1;
+                // In count mode only the number is used.
+                !spec.count_mode
+            };
+            match resolved {
+                Cow::Borrowed(values) => {
+                    for (name, value) in values {
+                        if keep(name) {
+                            all_values.push((Cow::Borrowed(name), Cow::Borrowed(value)));
+                        }
+                    }
+                }
+                Cow::Owned(values) => {
+                    for (name, value) in values {
+                        if keep(&name) {
+                            all_values.push((Cow::Owned(name), Cow::Owned(value)));
+                        }
+                    }
+                }
             }
             if spec.count_mode {
                 // An exclusion reduces the count, which is what a rule like
                 // `SecRule &ARGS:x "@eq 0"` is asking about.
-                all_values.push((format!("&{:?}", spec.name), resolved.len().to_string()));
-            } else {
-                all_values.extend(resolved);
+                all_values.push((
+                    Cow::Owned(format!("&{:?}", spec.name)),
+                    Cow::Owned(count.to_string()),
+                ));
             }
         }
 
@@ -914,8 +959,8 @@ impl Transaction {
                 if !rule.operator_negated {
                     matches.push((
                         MatchedVariable {
-                            name: name.clone(),
-                            value: value.clone(),
+                            name: name.into_owned(),
+                            value: value.into_owned(),
                             portion: Some("invalid UTF-8 encoding".to_string()),
                         },
                         Vec::new(),
@@ -947,7 +992,7 @@ impl Transaction {
 
                 if final_match {
                     let matched = MatchedVariable {
-                        name: name.clone(),
+                        name: name.to_string(),
                         // ModSecurity's MATCHED_VAR is the *variable's* value,
                         // not the portion the operator hit. The portion is
                         // reported separately, since an audit log wants both:
