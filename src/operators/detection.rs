@@ -1,18 +1,21 @@
 //! Detection operators (@detectSQLi, @detectXSS).
 //!
-//! These use our pure Rust libinjection implementation.
+//! Both are libinjection, through its Rust port `libinjectionrs`: the CRS is
+//! written against libinjection's verdicts, so anything else here is a source
+//! of false positives and misses.
 
 use super::traits::{Operator, OperatorResult};
-use crate::libinjection;
 
 /// SQL injection detection operator (@detectSQLi).
 pub struct DetectSqliOperator;
 
 impl Operator for DetectSqliOperator {
     fn execute(&self, value: &str) -> OperatorResult {
-        let result = libinjection::sqli::detect_sqli(value);
-        if result.is_injection {
-            OperatorResult::matched(result.fingerprint.unwrap_or_default())
+        let result = libinjectionrs::detect_sqli(value.as_bytes());
+        if result.is_injection() {
+            // What matched is libinjection's fingerprint, as in ModSecurity.
+            let fingerprint = result.fingerprint.map(|f| f.as_str().to_string());
+            OperatorResult::matched(fingerprint.unwrap_or_default())
         } else {
             OperatorResult::no_match()
         }
@@ -28,9 +31,9 @@ pub struct DetectXssOperator;
 
 impl Operator for DetectXssOperator {
     fn execute(&self, value: &str) -> OperatorResult {
-        let result = libinjection::xss::detect_xss(value);
-        if result.is_injection {
-            OperatorResult::matched(result.fingerprint.unwrap_or_default())
+        if libinjectionrs::detect_xss(value.as_bytes()).is_injection() {
+            // libinjection has no XSS fingerprint; what matched is the input.
+            OperatorResult::matched(value.to_string())
         } else {
             OperatorResult::no_match()
         }

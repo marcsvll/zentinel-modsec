@@ -29,5 +29,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "detect"
+path = "fuzz_targets/detect.rs"
+test = false
+doc = false
+bench = false
+
 # Not a member of a workspace above it.
 [workspace]

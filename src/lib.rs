@@ -14,7 +14,7 @@
 //!
 //! - SecLang rule parsing and evaluation
 //! - Loads the stock OWASP CRS rule set
-//! - Pure Rust libinjection for @detectSQLi/@detectXSS
+//! - `@detectSQLi` and `@detectXSS` on a pure Rust port of libinjection
 //! - Thread-safe, async-ready transaction processing
 //! - Zero external C/C++ dependencies
 //!
@@ -48,7 +48,6 @@
 pub mod actions;
 pub mod engine;
 pub mod error;
-pub mod libinjection;
 pub mod operators;
 pub mod parser;
 pub mod transformations;

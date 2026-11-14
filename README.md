@@ -54,7 +54,7 @@ absolute numbers, which are hardware-dependent. Reproduce with
 - **Loads the stock OWASP CRS** - all 703 rules of CRS 4.30 parse and execute; conformance is [measured on every push](#crs-conformance)
 - **Pure Rust** - No libmodsecurity, no C/C++ dependencies, no FFI
 - **SecLang Support** - Load standard ModSecurity `.conf` rule files
-- **Built-in Detection** - Native `@detectSQLi` and `@detectXSS` operators (pure Rust libinjection)
+- **Built-in Detection** - Native `@detectSQLi` and `@detectXSS` operators (the `libinjectionrs` port of libinjection, pure Rust)
 - **All Operators** - `@rx`, `@pm`, `@pmFromFile`, `@contains`, `@streq`, `@ipMatch`, and 30+ more
 - **All Transformations** - `t:lowercase`, `t:urlDecode`, `t:base64Decode`, `t:htmlEntityDecode`, and 30+ more
 - **Thread-Safe** - `Send + Sync`, safe for concurrent request processing
