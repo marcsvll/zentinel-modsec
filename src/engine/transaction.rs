@@ -522,15 +522,24 @@ impl Transaction {
             // Handle skipAfter
             if let Some(ref marker) = skip_after {
                 if let Some(marker_idx) = self.ruleset.marker(marker, phase) {
-                    if marker_idx > idx {
+                    // `idx` is already the rule after the one that asked to
+                    // skip, and a marker's position is the first rule after
+                    // it. Equal means the marker comes right after the rule in
+                    // this phase: there is nothing to skip, and evaluation
+                    // goes on from here. Treating that as "behind" skipped the
+                    // rest of the phase -- which is what the CRS's last
+                    // paranoia gate of each file does at paranoia 3 (9xx017,
+                    // then the marker), so at that level nothing after the
+                    // first gate ran.
+                    if marker_idx >= idx {
                         idx = marker_idx;
                         skip_after = None;
                         continue;
                     }
                 }
-                // The marker is unknown, or sits at or behind the current
-                // position: ModSecurity does not jump backwards, so the rest of
-                // the phase is skipped.
+                // The marker is unknown, or sits before the rule that named
+                // it: ModSecurity does not jump backwards, so the rest of the
+                // phase is skipped.
                 idx += 1;
                 continue;
             }
