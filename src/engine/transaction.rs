@@ -142,8 +142,19 @@ fn kept_for_the_record(value: &str) -> String {
 /// from a false one, or to write a useful audit log entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchedData {
-    /// ID of the rule that matched, if it has one.
+    /// ID of the rule that matched, if it has one. A rule chained after
+    /// another has no id of its own: its matches carry the id of the chain,
+    /// which is the first rule's.
     pub rule_id: Option<String>,
+    /// Where in a chain the rule that matched is: 0 for a rule on its own or
+    /// the first rule of a chain, `n` for the `n`th rule chained after it.
+    ///
+    /// ModSecurity expands a chain's `msg` and `logdata` when its last rule has
+    /// matched, so `MATCHED_VAR` there is the latest match of the last link,
+    /// not the first rule's.
+    pub link: usize,
+    /// The rule has `capture`, so this match set `TX:0`..`TX:9`.
+    pub captured: bool,
     /// Name of the variable that matched, e.g. `ARGS:json.q`.
     pub variable: String,
     /// The variable's value, after transformations were applied.
@@ -634,14 +645,22 @@ impl Transaction {
                     }
                 }
                 let recorded_before = self.matched_data.len();
+                // A link's matches are recorded under the id of its chain.
+                let (record_id, link) = match chain_state.chain_start {
+                    Some(start) if chain_state.in_chain => (&rules[start].id, idx - start),
+                    _ => (&rule.id, 0),
+                };
+                let captured = has_capture(rule);
                 for (var, caps) in &outcome.matches {
-                    if has_capture(rule) {
+                    if captured {
                         self.store_captures(var.portion.clone(), caps);
                     }
                     self.matched_vars
                         .push((var.name.clone(), var.value.clone()));
                     let record = MatchedData {
-                        rule_id: rule.id.clone(),
+                        rule_id: record_id.clone(),
+                        link,
+                        captured,
                         variable: var.name.clone(),
                         value: kept_for_the_record(&var.value),
                         matched_portion: var.portion.as_deref().map(kept_for_the_record),
