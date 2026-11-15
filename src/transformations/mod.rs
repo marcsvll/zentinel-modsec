@@ -4,11 +4,13 @@ mod decode;
 mod encode;
 mod normalize;
 mod pipeline;
+mod unicode_map;
 
 pub use decode::*;
 pub use encode::*;
 pub use normalize::*;
 pub use pipeline::TransformationPipeline;
+pub use unicode_map::{UnicodeMap, US_ASCII_CODE_PAGE};
 
 use crate::error::{Error, Result};
 use std::borrow::Cow;
@@ -25,6 +27,19 @@ pub trait Transformation: Send + Sync {
 
 /// Create a transformation from a name.
 pub fn create_transformation(name: &str) -> Result<Arc<dyn Transformation>> {
+    create_transformation_with(name, None)
+}
+
+/// Create a transformation from a name, with the best-fit table a
+/// `SecUnicodeMapFile` directive named for `urlDecodeUni` (`None`: the
+/// built-in one).
+pub fn create_transformation_with(
+    name: &str,
+    unicode_map: Option<&Arc<UnicodeMap>>,
+) -> Result<Arc<dyn Transformation>> {
+    if let (true, Some(map)) = (name.eq_ignore_ascii_case("urldecodeuni"), unicode_map) {
+        return Ok(Arc::new(UrlDecodeUniWith(Arc::clone(map))));
+    }
     match name.to_lowercase().as_str() {
         // Decoding
         "urldecode" => Ok(Arc::new(UrlDecode)),

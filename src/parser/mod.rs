@@ -168,6 +168,7 @@ impl Parser {
             "secrequestbodyaccess" => self.parse_boolean_directive(lexer, "SecRequestBodyAccess"),
             "secresponsebodyaccess" => self.parse_boolean_directive(lexer, "SecResponseBodyAccess"),
             "include" => self.parse_include(lexer),
+            "secunicodemapfile" => self.parse_secunicodemapfile(lexer),
             // Recognized engine-config/metadata directives that have no effect on
             // rule evaluation — skip quietly rather than warning.
             "seccomponentsignature" | "seccollectiontimeout" => {
@@ -429,6 +430,24 @@ impl Parser {
         self.parse_glob(&resolved_path)?;
 
         Ok(Directive::Include(resolved_path.into()))
+    }
+
+    /// Parse a SecUnicodeMapFile directive: a file and a code page.
+    fn parse_secunicodemapfile(&mut self, lexer: &mut Lexer) -> Result<Directive> {
+        let path = self.expect_argument(lexer, "SecUnicodeMapFile path")?;
+        let code_page = self.expect_argument(lexer, "SecUnicodeMapFile code page")?;
+        let code_page = code_page.parse().map_err(|_| {
+            Error::parse(
+                format!("invalid SecUnicodeMapFile code page: {code_page}"),
+                self.location.to_string(),
+            )
+        })?;
+        // Relative to the file that names it, as Include is.
+        let path = match self.location.file.as_ref().and_then(|f| f.parent()) {
+            Some(parent) if parent.join(&path).exists() => parent.join(&path),
+            _ => path.into(),
+        };
+        Ok(Directive::SecUnicodeMapFile { path, code_page })
     }
 
     /// Expect an unquoted argument.

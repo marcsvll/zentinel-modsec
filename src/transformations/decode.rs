@@ -1,7 +1,8 @@
 //! Decoding transformations.
 
-use super::Transformation;
+use super::{Transformation, UnicodeMap};
 use std::borrow::Cow;
+use std::sync::Arc;
 
 /// URL decode transformation.
 pub struct UrlDecode;
@@ -34,8 +35,25 @@ impl Transformation for UrlDecode {
     }
 }
 
-/// URL decode with Unicode support.
+/// URL decode with Unicode support, `%uXXXX` read through the built-in
+/// best-fit table ([`UnicodeMap::us_ascii`]).
 pub struct UrlDecodeUni;
+
+/// [`UrlDecodeUni`] with the table a `SecUnicodeMapFile` directive named.
+pub struct UrlDecodeUniWith(pub Arc<UnicodeMap>);
+
+impl Transformation for UrlDecodeUniWith {
+    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        if UrlDecodeUni::untouched(input) {
+            return Cow::Borrowed(input);
+        }
+        UrlDecodeUni::full(input, &self.0)
+    }
+
+    fn name(&self) -> &'static str {
+        "urlDecodeUni"
+    }
+}
 
 impl UrlDecodeUni {
     /// Whether the transformation would leave `input` as it is, decided
@@ -50,11 +68,13 @@ impl UrlDecodeUni {
     /// and decoding goes on with the character after it, so `%u%27` is `%u'`
     /// and `%%27` is `%'`. Only hexadecimal digits count as digits (no sign).
     ///
-    /// `%uFF01` to `%uFF5E`, the full-width forms, decode to the ASCII
-    /// characters they stand for (ModSecurity adds 0x20 to the low byte), so
+    /// A `%uXXXX` the best-fit table folds decodes to what it folds to
+    /// (`%u2019` is `'`, `%u00AB` is `<`). `%uFF01` to `%uFF5E`, the
+    /// full-width forms, decode to the ASCII characters they stand for
+    /// whatever the table (ModSecurity adds 0x20 to the low byte), so
     /// `%uFF1Cscript%uFF1E` is `<script>`: a backend that normalizes them sees
     /// ASCII, and so must the rules.
-    fn full<'a>(input: &'a str) -> Cow<'a, str> {
+    fn full<'a>(input: &'a str, map: &UnicodeMap) -> Cow<'a, str> {
         let chars: Vec<char> = input.chars().collect();
         let mut result = String::with_capacity(input.len());
         let mut modified = false;
@@ -66,8 +86,9 @@ impl UrlDecodeUni {
                     let unicode = matches!(chars.get(i + 1), Some('u' | 'U'))
                         .then(|| hex_digits(&chars[i + 2..], 4))
                         .flatten()
-                        .and_then(|code| match code {
-                            0xff01..=0xff5e => char::from_u32(code - 0xff00 + 0x20),
+                        .and_then(|code| match (map.get(code), code) {
+                            (Some(byte), _) => Some(char::from(byte)),
+                            (None, 0xff01..=0xff5e) => char::from_u32(code - 0xff00 + 0x20),
                             // A surrogate is not a character: left as written.
                             _ => char::from_u32(code),
                         });
@@ -119,7 +140,7 @@ impl Transformation for UrlDecodeUni {
         if Self::untouched(input) {
             return Cow::Borrowed(input);
         }
-        Self::full(input)
+        Self::full(input, &UnicodeMap::us_ascii())
     }
 
     fn name(&self) -> &'static str {
@@ -390,7 +411,9 @@ mod tests {
     fn test_untouched_implies_unchanged() {
         type Check = (&'static str, fn(&str) -> bool, fn(&str) -> Cow<'_, str>);
         let checks: [Check; 3] = [
-            ("UrlDecodeUni", UrlDecodeUni::untouched, UrlDecodeUni::full),
+            ("UrlDecodeUni", UrlDecodeUni::untouched, |input| {
+                UrlDecodeUni::full(input, &UnicodeMap::us_ascii())
+            }),
             ("JsDecode", JsDecode::untouched, JsDecode::full),
             ("CssDecode", CssDecode::untouched, CssDecode::full),
         ];
@@ -457,7 +480,9 @@ mod tests {
         assert_eq!(t.transform("%ud800"), "%ud800");
         // Well-formed escapes, either case.
         assert_eq!(t.transform("%41%u0042%U0043"), "ABC");
-        assert_eq!(t.transform("%u00e9"), "\u{e9}");
+        // What the best-fit table folds decodes folded; the rest is the character.
+        assert_eq!(t.transform("%u00e9"), "e");
+        assert_eq!(t.transform("%u4e2d"), "\u{4e2d}");
         assert_eq!(t.transform("%e9"), "\u{e9}");
     }
 

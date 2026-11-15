@@ -7,7 +7,7 @@ use crate::parser::{
     RuleEngineMode as ParserRuleEngineMode, RuleIdSelector, Selection, UpdateTargetById,
     VariableName, VariableSpec, XmlTarget,
 };
-use crate::transformations::TransformationPipeline;
+use crate::transformations::{TransformationPipeline, UnicodeMap};
 
 use super::phase::Phase;
 use std::collections::HashMap;
@@ -181,6 +181,26 @@ impl CompiledRuleset {
             })
             .flatten()
             .collect();
+        // SecUnicodeMapFile configures t:urlDecodeUni for every rule, wherever
+        // the directive stands; the last one wins. A file that cannot be read,
+        // or that lacks the code page, is a load error: the rules would
+        // otherwise decode differently from what the configuration says.
+        let mut unicode_map: Option<Arc<UnicodeMap>> = None;
+        for directive in &directives {
+            if let Directive::SecUnicodeMapFile { path, code_page } = directive {
+                let bytes = std::fs::read(path).map_err(|e| crate::error::Error::Config {
+                    message: format!("SecUnicodeMapFile {}: {e}", path.display()),
+                })?;
+                let map = UnicodeMap::parse(&String::from_utf8_lossy(&bytes), *code_page)
+                    .ok_or_else(|| crate::error::Error::Config {
+                        message: format!(
+                            "SecUnicodeMapFile {}: no mapping for code page {code_page}",
+                            path.display()
+                        ),
+                    })?;
+                unicode_map = Some(Arc::new(map));
+            }
+        }
         let mut target_updates: Vec<UpdateTargetById> = Vec::new();
         // When a removed rule is a chain head, its continuation rules (which
         // usually carry no id of their own) must be dropped with it.
@@ -218,7 +238,8 @@ impl CompiledRuleset {
                         continue;
                     }
 
-                    let transformations = extract_transformations(&rule.actions)?;
+                    let transformations =
+                        extract_transformations(&rule.actions, unicode_map.as_ref())?;
 
                     report_unimplemented_variables(&rule.variables, &id);
 
@@ -275,7 +296,8 @@ impl CompiledRuleset {
                     // SecAction is like a rule that always matches
                     let phase = extract_phase(&sec_action.actions);
                     let id = extract_id(&sec_action.actions);
-                    let transformations = extract_transformations(&sec_action.actions)?;
+                    let transformations =
+                        extract_transformations(&sec_action.actions, unicode_map.as_ref())?;
 
                     // Create a rule with unconditional match operator
                     let operator_spec = OperatorSpec {
@@ -628,7 +650,10 @@ fn has_chain(actions: &[Action]) -> bool {
 }
 
 /// Extract and compile transformation pipeline.
-fn extract_transformations(actions: &[Action]) -> Result<TransformationPipeline> {
+fn extract_transformations(
+    actions: &[Action],
+    unicode_map: Option<&Arc<UnicodeMap>>,
+) -> Result<TransformationPipeline> {
     let mut names = Vec::new();
     for action in actions {
         if let Action::Transformation(t) = action {
@@ -638,7 +663,7 @@ fn extract_transformations(actions: &[Action]) -> Result<TransformationPipeline>
     if names.is_empty() {
         Ok(TransformationPipeline::new())
     } else {
-        TransformationPipeline::from_names(&names)
+        TransformationPipeline::from_names_with(&names, unicode_map)
     }
 }
 

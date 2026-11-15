@@ -36,6 +36,13 @@ pub enum Directive {
     SecRequestBodyLimit(usize),
     /// SecResponseBodyLimit directive.
     SecResponseBodyLimit(usize),
+    /// SecUnicodeMapFile directive - the best-fit table of `t:urlDecodeUni`.
+    SecUnicodeMapFile {
+        /// The mapping file, in ModSecurity's format.
+        path: PathBuf,
+        /// The code page of that file to use.
+        code_page: u32,
+    },
     /// Include directive - include another file.
     Include(PathBuf),
     /// Unknown directive (logged and skipped).

@@ -1,6 +1,6 @@
 //! Transformation pipeline.
 
-use super::{create_transformation, Transformation};
+use super::{create_transformation_with, Transformation, UnicodeMap};
 use crate::error::Result;
 use once_cell::sync::Lazy;
 use std::borrow::Cow;
@@ -40,6 +40,15 @@ impl TransformationPipeline {
 
     /// Create a pipeline from transformation names.
     pub fn from_names(names: &[String]) -> Result<Self> {
+        Self::from_names_with(names, None)
+    }
+
+    /// Create a pipeline from transformation names, with the best-fit table
+    /// of a `SecUnicodeMapFile` directive (`None`: the built-in one).
+    pub fn from_names_with(
+        names: &[String],
+        unicode_map: Option<&Arc<UnicodeMap>>,
+    ) -> Result<Self> {
         let mut transformations = Vec::new();
 
         for name in names {
@@ -49,7 +58,7 @@ impl TransformationPipeline {
                 continue;
             }
 
-            let t = create_transformation(name)?;
+            let t = create_transformation_with(name, unicode_map)?;
             transformations.push(t);
         }
 
@@ -146,6 +155,7 @@ impl std::fmt::Debug for TransformationPipeline {
 
 #[cfg(test)]
 mod tests {
+    use super::super::create_transformation;
     use super::*;
 
     #[test]
