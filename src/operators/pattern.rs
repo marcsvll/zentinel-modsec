@@ -8,6 +8,68 @@ use aho_corasick::AhoCorasick;
 use once_cell::sync::OnceCell;
 use regex::Regex;
 
+/// How a pattern is compiled.
+///
+/// ModSecurity hands patterns to PCRE without its UTF mode: the subject is a
+/// sequence of bytes, `\xHH` and `\x{HH}` are bytes, `.` and a negated class
+/// take one byte, and `\w`, `\s`, `\b` and `(?i)` are ASCII. The CRS is
+/// written for that (942430 spells U+2019 as `\x{e2}\x80\x99`), so that is how
+/// a pattern is read here. A pattern that only makes sense with Unicode
+/// (`\p{L}`, a non-ASCII character in a class, an escape above `\x{FF}`) does
+/// not parse that way and is compiled over characters instead.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Bytes,
+    Characters,
+}
+
+enum Compiled {
+    Bytes(regex::bytes::Regex),
+    Characters(Regex),
+}
+
+/// The pattern as the `regex` crate needs it to mean bytes. With Unicode off,
+/// `\xHH` is a byte there, but `\x{HH}` stays a code point (`\x{e2}` would
+/// match the two bytes of U+00E2), while PCRE without UTF reads both as the
+/// byte. Braced escapes up to `FF` are rewritten to the two-digit form; a
+/// larger one is left alone and sends the pattern to [`Mode::Characters`].
+fn as_bytes_pattern(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut rest = pattern;
+    while let Some(at) = rest.find('\\') {
+        out.push_str(&rest[..at]);
+        let escape = &rest[at..];
+        let braced = escape.strip_prefix("\\x{").and_then(|tail| {
+            let end = tail.find('}')?;
+            let byte = u8::from_str_radix(&tail[..end], 16).ok()?;
+            Some((byte, 4 + end))
+        });
+        match braced {
+            Some((byte, len)) => {
+                out.push_str(&format!("\\x{byte:02x}"));
+                rest = &escape[len..];
+            }
+            None => {
+                // Any other escape, its character included, so that the `x`
+                // of `\\x{41}` (a literal backslash) is not read as one.
+                let len = 1 + escape[1..].chars().next().map_or(0, char::len_utf8);
+                out.push_str(&escape[..len]);
+                rest = &escape[len..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn syntax_error(mode: Mode, pattern: &str) -> Option<String> {
+    let mut parser = regex_syntax::ParserBuilder::new();
+    if mode == Mode::Bytes {
+        parser.unicode(false).utf8(false);
+    }
+    parser.build().parse(pattern).err().map(|e| e.to_string())
+}
+
 /// Regex operator (@rx) with lazy compilation.
 ///
 /// The pattern's *syntax* is validated when the rule is loaded, but the
@@ -19,10 +81,11 @@ use regex::Regex;
 /// and the rule would silently never match — a dead rule that looks alive.
 pub struct RxOperator {
     pattern_str: String,
+    mode: Mode,
     /// `None` once compilation has been attempted and failed, so a pattern
     /// that passes syntax validation but cannot be built (an oversized
     /// program, say) is reported once rather than retried per request.
-    compiled: OnceCell<Option<Regex>>,
+    compiled: OnceCell<Option<Compiled>>,
 }
 
 impl RxOperator {
@@ -41,15 +104,21 @@ impl RxOperator {
             });
         }
 
-        if let Err(e) = regex_syntax::Parser::new().parse(pattern) {
+        let as_bytes = as_bytes_pattern(pattern);
+        let (mode, pattern) = if syntax_error(Mode::Bytes, &as_bytes).is_none() {
+            (Mode::Bytes, as_bytes.as_str())
+        } else if let Some(error) = syntax_error(Mode::Characters, pattern) {
             return Err(Error::RegexCompile {
                 pattern: pattern.to_string(),
-                source: regex::Error::Syntax(e.to_string()),
+                source: regex::Error::Syntax(error),
             });
-        }
+        } else {
+            (Mode::Characters, pattern)
+        };
 
         Ok(Self {
             pattern_str: pattern.to_string(),
+            mode,
             compiled: OnceCell::new(),
         })
     }
@@ -61,21 +130,37 @@ impl RxOperator {
     /// build, for instance. It is reported once, because a rule that cannot
     /// match must not do so silently.
     #[inline]
-    fn get_regex(&self) -> Option<&Regex> {
+    fn get_regex(&self) -> Option<&Compiled> {
         self.compiled
-            .get_or_init(|| match Regex::new(&self.pattern_str) {
-                Ok(regex) => Some(regex),
-                Err(e) => {
-                    tracing::error!(
-                        pattern = %self.pattern_str,
-                        error = %e,
-                        "regex could not be compiled at first use; this rule can never match"
-                    );
-                    None
+            .get_or_init(|| {
+                let compiled = match self.mode {
+                    Mode::Bytes => regex::bytes::RegexBuilder::new(&self.pattern_str)
+                        .unicode(false)
+                        .build()
+                        .map(Compiled::Bytes),
+                    Mode::Characters => Regex::new(&self.pattern_str).map(Compiled::Characters),
+                };
+                match compiled {
+                    Ok(regex) => Some(regex),
+                    Err(e) => {
+                        tracing::error!(
+                            pattern = %self.pattern_str,
+                            error = %e,
+                            "regex could not be compiled at first use; this rule can never match"
+                        );
+                        None
+                    }
                 }
             })
             .as_ref()
     }
+}
+
+/// A match and its groups as text. A group matched over bytes can end inside
+/// a character; what is published is then the text with the cut character
+/// replaced, as everything else here is text.
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 impl Operator for RxOperator {
@@ -88,27 +173,43 @@ impl Operator for RxOperator {
         // room for all of them before searching -- several hundred bytes for
         // the larger CRS patterns, on every value of every rule -- so ask
         // first whether there is a match at all, which reserves nothing.
-        if !regex.is_match(value) {
-            return OperatorResult::no_match();
-        }
-
-        if let Some(captures) = regex.captures(value) {
-            let matched_value = captures.get(0).map(|m| m.as_str().to_string());
-            let capture_groups: Vec<String> = captures
-                .iter()
-                .skip(1) // Skip the full match
-                // A group that did not take part keeps its slot, empty, so
-                // TX:2 is always the second group.
-                .map(|c| c.map(|m| m.as_str().to_string()).unwrap_or_default())
-                .collect();
-
-            OperatorResult {
-                matched: true,
-                captures: capture_groups,
-                matched_value,
+        match regex {
+            Compiled::Bytes(regex) => {
+                if !regex.is_match(value.as_bytes()) {
+                    return OperatorResult::no_match();
+                }
+                let Some(captures) = regex.captures(value.as_bytes()) else {
+                    return OperatorResult::no_match();
+                };
+                OperatorResult {
+                    matched: true,
+                    matched_value: captures.get(0).map(|m| text(m.as_bytes())),
+                    // A group that did not take part keeps its slot, empty, so
+                    // TX:2 is always the second group.
+                    captures: captures
+                        .iter()
+                        .skip(1)
+                        .map(|c| c.map(|m| text(m.as_bytes())).unwrap_or_default())
+                        .collect(),
+                }
             }
-        } else {
-            OperatorResult::no_match()
+            Compiled::Characters(regex) => {
+                if !regex.is_match(value) {
+                    return OperatorResult::no_match();
+                }
+                let Some(captures) = regex.captures(value) else {
+                    return OperatorResult::no_match();
+                };
+                OperatorResult {
+                    matched: true,
+                    matched_value: captures.get(0).map(|m| m.as_str().to_string()),
+                    captures: captures
+                        .iter()
+                        .skip(1)
+                        .map(|c| c.map(|m| m.as_str().to_string()).unwrap_or_default())
+                        .collect(),
+                }
+            }
         }
     }
 
