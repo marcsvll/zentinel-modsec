@@ -682,77 +682,68 @@ impl EscapeSeqDecode {
         !input.contains('\\')
     }
 
+    /// Decode ANSI C escapes, as ModSecurity does: `\a \b \f \n \r \t \v`,
+    /// `\\ \? \' \"`, `\xHH` (two hexadecimal digits) and `\OOO` (one to
+    /// three octal digits). Any other escape loses its backslash and keeps
+    /// the character (`\q` is `q`, `\u0041` is `u0041`); a `\x` without two
+    /// digits loses the backslash too. A backslash that ends the input stays.
     fn full<'a>(input: &'a str) -> Cow<'a, str> {
-        // Decode escape sequences like \n, \r, \t, \xHH, \uHHHH
-        let mut result = String::new();
-        let mut chars = input.chars().peekable();
+        let chars: Vec<char> = input.chars().collect();
+        let mut result = String::with_capacity(input.len());
         let mut modified = false;
+        let mut i = 0;
 
-        while let Some(c) = chars.next() {
-            if c == '\\' {
-                if let Some(&next) = chars.peek() {
-                    modified = true;
-                    chars.next();
-                    match next {
-                        'n' => result.push('\n'),
-                        'r' => result.push('\r'),
-                        't' => result.push('\t'),
-                        '\\' => result.push('\\'),
-                        '0' => result.push('\0'),
-                        'x' => {
-                            // Hex escape \xHH
-                            let mut hex = String::new();
-                            for _ in 0..2 {
-                                if let Some(&h) = chars.peek() {
-                                    if h.is_ascii_hexdigit() {
-                                        hex.push(chars.next().unwrap());
-                                    } else {
-                                        break;
-                                    }
-                                }
-                            }
-                            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                                result.push(byte as char);
-                            } else {
-                                result.push('x');
-                                result.push_str(&hex);
-                            }
-                        }
-                        'u' => {
-                            // Unicode escape \uHHHH
-                            let mut hex = String::new();
-                            for _ in 0..4 {
-                                if let Some(&h) = chars.peek() {
-                                    if h.is_ascii_hexdigit() {
-                                        hex.push(chars.next().unwrap());
-                                    } else {
-                                        break;
-                                    }
-                                }
-                            }
-                            if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                                if let Some(c) = char::from_u32(code) {
-                                    result.push(c);
-                                } else {
-                                    result.push('u');
-                                    result.push_str(&hex);
-                                }
-                            } else {
-                                result.push('u');
-                                result.push_str(&hex);
-                            }
-                        }
-                        _ => {
-                            result.push('\\');
-                            result.push(next);
-                        }
-                    }
-                } else {
-                    result.push(c);
-                }
-            } else {
-                result.push(c);
+        while i < chars.len() {
+            let Some(&next) = (chars[i] == '\\').then(|| chars.get(i + 1)).flatten() else {
+                result.push(chars[i]);
+                i += 1;
+                continue;
+            };
+            modified = true;
+            let simple = match next {
+                'a' => Some('\u{7}'),
+                'b' => Some('\u{8}'),
+                'f' => Some('\u{c}'),
+                'n' => Some('\n'),
+                'r' => Some('\r'),
+                't' => Some('\t'),
+                'v' => Some('\u{b}'),
+                '\\' | '?' | '\'' | '"' => Some(next),
+                _ => None,
+            };
+            if let Some(decoded) = simple {
+                result.push(decoded);
+                i += 2;
+                continue;
             }
+            let hex = matches!(next, 'x' | 'X')
+                .then(|| chars.get(i + 2..i + 4))
+                .flatten()
+                .and_then(|digits| {
+                    let high = digits[0].to_digit(16)?;
+                    let low = digits[1].to_digit(16)?;
+                    Some((high * 16 + low) as u8)
+                });
+            if let Some(byte) = hex {
+                result.push(char::from(byte));
+                i += 4;
+                continue;
+            }
+            let octal: Vec<u32> = chars[i + 1..]
+                .iter()
+                .take(3)
+                .map_while(|c| c.to_digit(8))
+                .collect();
+            if !octal.is_empty() {
+                // Three digits can exceed a byte; C keeps the low eight bits.
+                let value = octal.iter().fold(0, |value, digit| value * 8 + digit);
+                result.push(char::from(value as u8));
+                i += 1 + octal.len();
+                continue;
+            }
+            // Not an escape: the backslash goes, the character stays.
+            result.push(next);
+            i += 2;
         }
 
         if modified {
