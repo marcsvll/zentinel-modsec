@@ -229,3 +229,36 @@ fn what_the_crs_still_refuses_of_the_misses() {
         println!("    {value:?}");
     }
 }
+
+/// The engine answers "no" for a value of ASCII letters, digits and
+/// underscores without calling libinjection (`is_one_plain_token` there). The
+/// C library must never report such a value: every one in the corpora, every
+/// single-word entry of its keyword table, and number spellings.
+#[test]
+fn the_c_library_never_reports_a_single_word_or_number() {
+    let plain = |v: &str| v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    let mut values: BTreeSet<String> = corpus().into_iter().filter(|v| plain(v)).collect();
+    let c_dir = std::env::var_os("LIBINJECTION_C_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("libinjection-c"));
+    let table =
+        std::fs::read_to_string(c_dir.join("src/sqlparse_data.json")).expect("the keyword table");
+    // Every quoted string of the table that is one plain word: keywords,
+    // functions, types, and fingerprints, in both cases.
+    for word in table.split('"').filter(|w| !w.is_empty() && plain(w)) {
+        values.insert(word.to_string());
+        values.insert(word.to_ascii_lowercase());
+    }
+    for number in [
+        "0", "007", "1e5", "1E5", "0x", "0x41", "0X41", "0b", "0b1", "0B101", "1_000", "x41", "n1",
+        "b1", "e1", "u0041", "_", "__a",
+    ] {
+        values.insert(number.to_string());
+    }
+    assert!(values.len() > 1000, "only {} plain values", values.len());
+    for value in &values {
+        assert_eq!(c(value).sqli, None, "the C library reports {value:?}");
+        assert_eq!(engine(value).sqli, None, "the engine reports {value:?}");
+    }
+    println!("{} single words and numbers, none reported", values.len());
+}

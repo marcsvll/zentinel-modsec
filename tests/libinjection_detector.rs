@@ -86,3 +86,25 @@ fn what_the_translation_missed_and_the_c_library_reports() {
         );
     }
 }
+
+#[test]
+fn a_single_word_or_number_is_never_sql_injection() {
+    // Answered without running libinjection; the C library agrees
+    // (differential/).
+    for value in [
+        "",
+        "select",
+        "UNION",
+        "0x41",
+        "1e5",
+        "sleep",
+        "sp_password",
+        "a_b_1",
+        "NULL",
+    ] {
+        assert!(!sqli(value), "{value:?}");
+    }
+    // One character more and libinjection decides.
+    assert!(sqli("1 union select 1"));
+    assert!(sqli("1'or'1'='1"));
+}
