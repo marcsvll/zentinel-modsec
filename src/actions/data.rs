@@ -45,7 +45,7 @@ pub fn expand_macros(
         .replace_all(&result, |caps: &regex::Captures| {
             let var_name = &caps[1];
             tx.get(var_name)
-                .and_then(|v| v.first().map(|s| s.to_string()))
+                .and_then(|v| v.first().map(|s| String::from_utf8_lossy(s).into_owned()))
                 .unwrap_or_default()
         })
         .into_owned();
@@ -78,7 +78,7 @@ mod tests {
         };
         apply_setvar(&mut tx, &op);
         let values = tx.get("score");
-        assert_eq!(values.and_then(|v| v.first().copied()), Some("5"));
+        assert_eq!(values.and_then(|v| v.first().copied()), Some(&b"5"[..]));
     }
 
     #[test]
@@ -92,7 +92,7 @@ mod tests {
         };
         apply_setvar(&mut tx, &op);
         let values = tx.get("score");
-        assert_eq!(values.and_then(|v| v.first().copied()), Some("15"));
+        assert_eq!(values.and_then(|v| v.first().copied()), Some(&b"15"[..]));
     }
 
     #[test]
@@ -106,7 +106,7 @@ mod tests {
         };
         apply_setvar(&mut tx, &op);
         let values = tx.get("score");
-        assert_eq!(values.and_then(|v| v.first().copied()), Some("7"));
+        assert_eq!(values.and_then(|v| v.first().copied()), Some(&b"7"[..]));
     }
 
     #[test]

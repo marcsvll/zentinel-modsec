@@ -20,7 +20,7 @@ struct Entry {
     name: VariableName,
     selection: Option<Selection>,
     /// Before the rule's own exclusions (`!ARGS:x`), which differ per rule.
-    values: Vec<(String, String)>,
+    values: crate::variables::Vals,
 }
 
 /// What the phase that is running has worked out so far.
@@ -136,7 +136,7 @@ impl Resolved {
     }
 
     /// The values kept at `slot`, as `(name, value)`.
-    pub(crate) fn values(&self, slot: usize) -> &[(String, String)] {
+    pub(crate) fn values(&self, slot: usize) -> &[(Vec<u8>, Vec<u8>)] {
         &self.entries[slot].values
     }
 }

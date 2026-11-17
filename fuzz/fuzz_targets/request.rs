@@ -3,7 +3,8 @@
 //! HTTP/1.1 wire format: request line, header lines, a blank line, then the body (`\r\n`
 //! or `\n`). Content-Type comes from the input, so every body processor (urlencoded,
 //! multipart, JSON, XML) is reached. Nothing may panic; a slow input is caught by the
-//! run's `-timeout`.
+//! run's `-timeout`. The URI, header names and values and the body reach the engine as
+//! the bytes they are, UTF-8 or not.
 #![no_main]
 use std::sync::OnceLock;
 
@@ -72,21 +73,18 @@ fuzz_target!(|data: &[u8]| {
     let Some(line) = lines.next() else { return };
     let mut parts = line.splitn(3, |&b| b == b' ');
     let method = String::from_utf8_lossy(parts.next().unwrap_or(b"GET"));
-    let uri = String::from_utf8_lossy(parts.next().unwrap_or(b"/"));
+    let uri = parts.next().unwrap_or(b"/");
 
     // Errors are results here, never panics: every step runs whatever the one before said.
     let mut tx = rules().new_transaction();
-    let _ = tx.process_uri(&uri, &method, "HTTP/1.1");
+    let _ = tx.process_uri(uri, &method, "HTTP/1.1");
     for l in lines {
         let Some(colon) = l.iter().position(|&b| b == b':') else {
             continue;
         };
         let value = l.get(colon + 1..).unwrap_or(&[]);
         let value = value.strip_prefix(b" ").unwrap_or(value);
-        let _ = tx.add_request_header(
-            &String::from_utf8_lossy(&l[..colon]),
-            &String::from_utf8_lossy(value),
-        );
+        let _ = tx.add_request_header(&l[..colon], value);
     }
     let _ = tx.process_request_headers();
     if !body.is_empty() {

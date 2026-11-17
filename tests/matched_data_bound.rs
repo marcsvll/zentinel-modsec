@@ -39,10 +39,10 @@ fn a_rule_that_matches_many_values_keeps_the_first_and_the_latest() {
         .filter(|m| m.rule_id.as_deref() == Some("1"))
         .collect();
     assert_eq!(of_rule_1.len(), MATCHED_DATA_PER_RULE);
-    assert_eq!(of_rule_1[0].variable, "ARGS:a0");
-    assert_eq!(of_rule_1[MATCHED_DATA_PER_RULE - 2].variable, "ARGS:a14");
+    assert_eq!(of_rule_1[0].variable, b"ARGS:a0");
+    assert_eq!(of_rule_1[MATCHED_DATA_PER_RULE - 2].variable, b"ARGS:a14");
     // The last place holds the latest match, which is what a log line reads.
-    assert_eq!(of_rule_1[MATCHED_DATA_PER_RULE - 1].variable, "ARGS:a99");
+    assert_eq!(of_rule_1[MATCHED_DATA_PER_RULE - 1].variable, b"ARGS:a99");
 
     // The next rule's record is its own, after the first rule's.
     let of_rule_2: Vec<_> = tx
@@ -51,12 +51,12 @@ fn a_rule_that_matches_many_values_keeps_the_first_and_the_latest() {
         .filter(|m| m.rule_id.as_deref() == Some("2"))
         .collect();
     assert_eq!(of_rule_2.len(), 1);
-    assert_eq!(of_rule_2[0].variable, "ARGS:a7");
+    assert_eq!(of_rule_2[0].variable, b"ARGS:a7");
 }
 
 #[test]
 fn a_long_value_is_kept_up_to_the_bound_and_matched_var_is_whole() {
-    // Two-byte characters, so that the cut has to respect a boundary.
+    // Two-byte characters: the record keeps bytes, so it may end inside one.
     let long = "%C3%A9".repeat(MATCHED_DATA_VALUE_BYTES);
     let tx = run(
         "SecRuleEngine On\n\
@@ -65,13 +65,12 @@ fn a_long_value_is_kept_up_to_the_bound_and_matched_var_is_whole() {
         &format!("/?a={long}"),
     );
     let record = &tx.matched_data()[0];
-    assert!(record.value.len() <= MATCHED_DATA_VALUE_BYTES);
-    assert!(record.value.len() >= MATCHED_DATA_VALUE_BYTES - 1);
-    assert!(record.value.chars().all(|c| c == '\u{e9}'));
+    assert_eq!(record.value.len(), MATCHED_DATA_VALUE_BYTES);
+    assert!(record.value.starts_with("\u{e9}\u{e9}".as_bytes()));
 
     // MATCHED_VAR, which rules read, was the whole value.
     let whole = (2 * MATCHED_DATA_VALUE_BYTES).to_string();
-    assert_eq!(tx.matched_data()[1].value, whole);
+    assert_eq!(tx.matched_data()[1].value, whole.as_bytes());
 }
 
 #[test]
@@ -82,6 +81,6 @@ fn a_short_value_is_kept_as_it_is() {
         "/?q=something-evil-here",
     );
     let record = &tx.matched_data()[0];
-    assert_eq!(record.value, "something-evil-here");
-    assert_eq!(record.matched_portion.as_deref(), Some("evil"));
+    assert_eq!(record.value, b"something-evil-here");
+    assert_eq!(record.matched_portion.as_deref(), Some(&b"evil"[..]));
 }

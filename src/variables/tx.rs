@@ -1,7 +1,7 @@
 //! TX (transaction) collection.
 
 use super::collection::{Collection, HashMapCollection, MutableCollection};
-use regex::Regex;
+use regex::bytes::Regex;
 use std::borrow::Cow;
 
 /// Transaction collection for storing intermediate values.
@@ -20,8 +20,8 @@ pub struct TxCollection {
 
 /// Lowercase a key only when it actually contains uppercase, so the common path
 /// (CRS writes and reads lowercase) does not allocate.
-fn normalize(key: &str) -> Cow<'_, str> {
-    if key.bytes().any(|b| b.is_ascii_uppercase()) {
+fn normalize(key: &[u8]) -> Cow<'_, [u8]> {
+    if key.iter().any(u8::is_ascii_uppercase) {
         Cow::Owned(key.to_ascii_lowercase())
     } else {
         Cow::Borrowed(key)
@@ -41,17 +41,17 @@ impl TxCollection {
 }
 
 impl Collection for TxCollection {
-    fn all(&self) -> Vec<(&str, &str)> {
+    fn all(&self) -> Vec<(&[u8], &[u8])> {
         self.data.all()
     }
 
-    fn get(&self, key: &str) -> Option<Vec<&str>> {
-        self.data.get(&normalize(key))
+    fn get(&self, key: impl AsRef<[u8]>) -> Option<Vec<&[u8]>> {
+        self.data.get(normalize(key.as_ref()))
     }
 
     /// Regex selection (`TX:/^foo/`) matches against the stored, lowercased
     /// key, so a pattern anchored on uppercase will not match.
-    fn get_regex(&self, pattern: &Regex) -> Vec<(&str, &str)> {
+    fn get_regex(&self, pattern: &Regex) -> Vec<(&[u8], &[u8])> {
         self.data.get_regex(pattern)
     }
 
@@ -59,28 +59,27 @@ impl Collection for TxCollection {
         self.data.count()
     }
 
-    fn count_key(&self, key: &str) -> usize {
-        self.data.count_key(&normalize(key))
+    fn count_key(&self, key: impl AsRef<[u8]>) -> usize {
+        self.data.count_key(normalize(key.as_ref()))
     }
 }
 
 impl MutableCollection for TxCollection {
-    fn set(&mut self, key: String, value: String) {
-        match normalize(&key) {
-            Cow::Borrowed(_) => self.data.set(key, value),
-            Cow::Owned(lower) => self.data.set(lower, value),
-        }
+    fn set(&mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) {
+        let mut key = key.into();
+        key.make_ascii_lowercase();
+        self.data.set(key, value);
     }
 
-    fn delete(&mut self, key: &str) {
-        self.data.delete(&normalize(key));
+    fn delete(&mut self, key: impl AsRef<[u8]>) {
+        self.data.delete(normalize(key.as_ref()));
     }
 
-    fn increment(&mut self, key: &str, amount: i64) {
-        self.data.increment(&normalize(key), amount);
+    fn increment(&mut self, key: impl AsRef<[u8]>, amount: i64) {
+        self.data.increment(normalize(key.as_ref()), amount);
     }
 
-    fn decrement(&mut self, key: &str, amount: i64) {
-        self.data.decrement(&normalize(key), amount);
+    fn decrement(&mut self, key: impl AsRef<[u8]>, amount: i64) {
+        self.data.decrement(normalize(key.as_ref()), amount);
     }
 }

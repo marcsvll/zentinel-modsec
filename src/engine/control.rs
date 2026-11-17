@@ -398,7 +398,7 @@ impl TransactionControls {
         rule_id: Option<&str>,
         tags: &[String],
         var: &VariableSpec,
-        resolved_name: &str,
+        resolved_name: &[u8],
     ) -> bool {
         let by_id = rule_id.is_some_and(|id| {
             self.removed_targets
@@ -429,7 +429,11 @@ impl TransactionControls {
 /// collection names round-trip: SecLang writes `REQUEST_HEADERS` where the
 /// enum variant renders as `RequestHeaders`, and comparing rendered names
 /// would silently never match.
-fn target_matches_resolved(var: &VariableSpec, target: &VariableSpec, resolved_name: &str) -> bool {
+fn target_matches_resolved(
+    var: &VariableSpec,
+    target: &VariableSpec,
+    resolved_name: &[u8],
+) -> bool {
     if var.name != target.name {
         return false;
     }
@@ -440,13 +444,14 @@ fn target_matches_resolved(var: &VariableSpec, target: &VariableSpec, resolved_n
         Some(Selection::Key(wanted)) => {
             // The resolver names collection members `COLLECTION:key`. A bare
             // name means a scalar variable, which a keyed target cannot select.
-            let Some((_, key)) = resolved_name.split_once(':') else {
+            let Some(colon) = resolved_name.iter().position(|&b| b == b':') else {
                 return false;
             };
+            let key = &resolved_name[colon + 1..];
             if header_keys_are_case_insensitive(var) {
-                key.eq_ignore_ascii_case(wanted.as_str())
+                key.eq_ignore_ascii_case(wanted.as_bytes())
             } else {
-                key == wanted.as_str()
+                key == wanted.as_bytes()
             }
         }
         // A regex selection in a ctl: target is not something ModSecurity
@@ -636,15 +641,15 @@ mod tests {
         )));
 
         let var = crate::parser::parse_single_variable("REQUEST_HEADERS:User-Agent").unwrap();
-        assert!(controls.is_target_removed(Some("1"), &[], &var, "REQUEST_HEADERS:User-Agent"));
+        assert!(controls.is_target_removed(Some("1"), &[], &var, b"REQUEST_HEADERS:User-Agent"));
         // Same target, different rule.
-        assert!(!controls.is_target_removed(Some("2"), &[], &var, "REQUEST_HEADERS:User-Agent"));
+        assert!(!controls.is_target_removed(Some("2"), &[], &var, b"REQUEST_HEADERS:User-Agent"));
 
         let other = crate::parser::parse_single_variable("REQUEST_HEADERS:Referer").unwrap();
-        assert!(!controls.is_target_removed(Some("1"), &[], &other, "REQUEST_HEADERS:Referer"));
+        assert!(!controls.is_target_removed(Some("1"), &[], &other, b"REQUEST_HEADERS:Referer"));
 
         // Header keys are case insensitive.
-        assert!(controls.is_target_removed(Some("1"), &[], &var, "REQUEST_HEADERS:user-agent"));
+        assert!(controls.is_target_removed(Some("1"), &[], &var, b"REQUEST_HEADERS:user-agent"));
     }
 
     /// The shape CRS actually uses: the rule targets a whole collection and
@@ -660,8 +665,8 @@ mod tests {
         )));
 
         let whole_args = crate::parser::parse_single_variable("ARGS").unwrap();
-        assert!(controls.is_target_removed(Some("942100"), &[], &whole_args, "ARGS:json.token"));
-        assert!(!controls.is_target_removed(Some("942100"), &[], &whole_args, "ARGS:json.query"));
+        assert!(controls.is_target_removed(Some("942100"), &[], &whole_args, b"ARGS:json.token"));
+        assert!(!controls.is_target_removed(Some("942100"), &[], &whole_args, b"ARGS:json.query"));
     }
 
     /// Argument names are case sensitive in ModSecurity, unlike header names.
@@ -675,8 +680,8 @@ mod tests {
         )));
 
         let args = crate::parser::parse_single_variable("ARGS").unwrap();
-        assert!(controls.is_target_removed(Some("1"), &[], &args, "ARGS:Token"));
-        assert!(!controls.is_target_removed(Some("1"), &[], &args, "ARGS:token"));
+        assert!(controls.is_target_removed(Some("1"), &[], &args, b"ARGS:Token"));
+        assert!(!controls.is_target_removed(Some("1"), &[], &args, b"ARGS:token"));
     }
 
     /// A keyed target cannot select a scalar variable, which has no members.
@@ -689,7 +694,7 @@ mod tests {
         )));
 
         let uri = crate::parser::parse_single_variable("REQUEST_URI").unwrap();
-        assert!(!controls.is_target_removed(Some("1"), &[], &uri, "REQUEST_URI"));
+        assert!(!controls.is_target_removed(Some("1"), &[], &uri, b"REQUEST_URI"));
     }
 
     #[test]
@@ -700,15 +705,15 @@ mod tests {
         // Naming the collection with no key excludes every member of it, for
         // a rule targeting the collection or any single member.
         let whole = crate::parser::parse_single_variable("ARGS").unwrap();
-        assert!(controls.is_target_removed(Some("1"), &[], &whole, "ARGS:token"));
-        assert!(controls.is_target_removed(Some("1"), &[], &whole, "ARGS:anything"));
+        assert!(controls.is_target_removed(Some("1"), &[], &whole, b"ARGS:token"));
+        assert!(controls.is_target_removed(Some("1"), &[], &whole, b"ARGS:anything"));
 
         let keyed = crate::parser::parse_single_variable("ARGS:token").unwrap();
-        assert!(controls.is_target_removed(Some("1"), &[], &keyed, "ARGS:token"));
+        assert!(controls.is_target_removed(Some("1"), &[], &keyed, b"ARGS:token"));
 
         // A different collection is untouched.
         let cookies = crate::parser::parse_single_variable("REQUEST_COOKIES").unwrap();
-        assert!(!controls.is_target_removed(Some("1"), &[], &cookies, "REQUEST_COOKIES:token"));
+        assert!(!controls.is_target_removed(Some("1"), &[], &cookies, b"REQUEST_COOKIES:token"));
     }
 
     #[test]

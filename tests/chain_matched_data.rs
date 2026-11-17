@@ -41,9 +41,9 @@ fn a_link_is_recorded_under_the_id_of_its_chain() {
     let records = of(&tx, "920360");
     assert_eq!(records.len(), 2, "{records:?}");
     assert_eq!(records[0].link, 0);
-    assert_eq!(records[0].value, "1", "the guard: one limit is configured");
+    assert_eq!(records[0].value, b"1", "the guard: one limit is configured");
     assert_eq!(records[1].link, 1);
-    assert_eq!(records[1].variable, "ARGS_NAMES:much_too_long");
+    assert_eq!(records[1].variable, b"ARGS_NAMES:much_too_long");
     assert!(
         tx.matched_data().iter().all(|m| m.rule_id.is_some()),
         "no match is left without the rule it belongs to: {:?}",
@@ -76,8 +76,8 @@ fn the_record_says_which_link_captured() {
     let links: Vec<(usize, bool)> = records.iter().map(|m| (m.link, m.captured)).collect();
     assert_eq!(links, [(0, true), (1, true), (2, false)], "{records:?}");
     let last_capture = records.iter().rev().find(|m| m.captured).unwrap();
-    assert_eq!(last_capture.matched_portion.as_deref(), Some("$u"));
-    assert_eq!(records.last().unwrap().value, "#a;cat$u /etc");
+    assert_eq!(last_capture.matched_portion.as_deref(), Some(&b"$u"[..]));
+    assert_eq!(records.last().unwrap().value, b"#a;cat$u /etc");
 }
 
 /// A chain whose later link does not match leaves its first rule's record

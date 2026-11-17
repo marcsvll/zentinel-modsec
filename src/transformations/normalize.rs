@@ -294,7 +294,7 @@ impl NormalizePath {
                     // only looks at the dot before, so `passwd..` took the
                     // segment before it too: `/etc/passwd..` became `/etc/`,
                     // and Windows reads `passwd..` as `passwd`.
-                    let whole_dots = dst == 1 || (dst > 1 && buf[dst - 2] == b'/');
+                    let whole_dots = dst == 1 || (dst > 1 && is_sep(buf[dst - 2]));
                     if dst > 0 && buf[dst - 1] == b'.' && whole_dots {
                         if relative && (hitroot || dst <= 2) {
                             // A back-reference with nothing before it.

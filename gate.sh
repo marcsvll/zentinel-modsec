@@ -4,6 +4,9 @@
 #   ./gate.sh            format, clippy (deny warnings), the test suite, the fuzz targets' build,
 #                        and the detectors against the C libinjection (differential/)
 #
+# With ModSecurity's vectors (vectors/fetch.sh) the test suite checks every transformation
+# and operator against them; without the checkout that test is skipped and the gate says so.
+#
 # With a CRS checkout (CRS_DIR, or test-rules/crs) the corpus test runs too; without one
 # it is skipped and the gate says so. A pass is recorded for the commit's tree under
 # .gate/, which .githooks/pre-push checks (git config core.hooksPath .githooks): a push
@@ -16,6 +19,11 @@ cd "$(dirname "$0")"
 empty=$(mktemp); trap 'rm -f "$empty"' EXIT
 echo "==> fmt";    cargo fmt --all --check -- --config-path "$empty"
 echo "==> clippy"; cargo clippy --all-targets -- -D warnings
+if [ -f vectors/secrules-language-tests/.commit ]; then
+  vectors=vectors-run
+else
+  echo "==> ModSecurity vectors: none (vectors/fetch.sh), their test is skipped"; vectors=vectors-not-run
+fi
 crs=${CRS_DIR:-test-rules/crs}
 if [ -f "$crs/crs-setup.conf" ] || [ -f "$crs/crs-setup.conf.example" ]; then
   echo "==> test (with the CRS corpus at $crs)"; CRS_DIR="$crs" cargo test --release
@@ -46,5 +54,5 @@ else
 fi
 mkdir -p .gate
 tree=$(git rev-parse 'HEAD^{tree}')
-echo "$(git rev-parse HEAD) $(date -u +%Y-%m-%dT%H:%M:%SZ) $corpus $fuzz $differential" > ".gate/$tree.ok"
-echo "gate: passed and recorded for $(git rev-parse --short HEAD) ($corpus, $fuzz, $differential)"
+echo "$(git rev-parse HEAD) $(date -u +%Y-%m-%dT%H:%M:%SZ) $corpus $vectors $fuzz $differential" > ".gate/$tree.ok"
+echo "gate: passed and recorded for $(git rev-parse --short HEAD) ($corpus, $vectors, $fuzz, $differential)"

@@ -186,7 +186,7 @@ fn run_stage(m: &ModSecurity, input: &Input) -> Vec<String> {
 
     let has = |n: &str| input.headers.keys().any(|k| k.eq_ignore_ascii_case(n));
     for (k, v) in &input.headers {
-        let _ = tx.add_request_header(k, &scalar(v));
+        let _ = tx.add_request_header(k, scalar(v));
     }
     let body = input.data.as_ref().map(scalar).unwrap_or_default();
     // go-ftw fills these in unless a test opts out.
@@ -205,7 +205,7 @@ fn run_stage(m: &ModSecurity, input: &Input) -> Vec<String> {
             let _ = tx.add_request_header("Accept", "*/*");
         }
         if !body.is_empty() && !has("Content-Length") {
-            let _ = tx.add_request_header("Content-Length", &body.len().to_string());
+            let _ = tx.add_request_header("Content-Length", body.len().to_string());
         }
     }
     if tx.process_request_headers().is_err() {
@@ -448,7 +448,7 @@ fn stock_crs_blocks_attacks_and_passes_ordinary_traffic() {
         tx.add_request_header("Connection", "keep-alive").unwrap();
         if !ct.is_empty() {
             tx.add_request_header("Content-Type", ct).unwrap();
-            tx.add_request_header("Content-Length", &body.len().to_string())
+            tx.add_request_header("Content-Length", body.len().to_string())
                 .unwrap();
         }
         tx.process_request_headers().unwrap();

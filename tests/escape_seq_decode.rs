@@ -3,12 +3,15 @@
 
 use zentinel_modsec::transformations::create_transformation;
 
-fn decoded(input: &str) -> String {
-    let out = create_transformation("escapeSeqDecode")
+fn decoded_bytes(input: &str) -> Vec<u8> {
+    create_transformation("escapeSeqDecode")
         .unwrap()
         .transform(input.as_bytes())
-        .into_owned();
-    String::from_utf8(out).expect("these escapes decode to text")
+        .into_owned()
+}
+
+fn decoded(input: &str) -> String {
+    String::from_utf8(decoded_bytes(input)).expect("these escapes decode to text")
 }
 
 #[test]
@@ -19,8 +22,9 @@ fn the_c_escapes() {
     assert_eq!(decoded(r"\101\60\0"), "A0\0");
     // Octal stops at three digits and at the first digit that is not octal.
     assert_eq!(decoded(r"\1018\18"), "A8\u{1}8");
-    // More than a byte keeps its low eight bits, as in C.
-    assert_eq!(decoded(r"\777"), "\u{ff}");
+    // More than a byte keeps its low eight bits, as in C; the result is that
+    // byte, not a character.
+    assert_eq!(decoded_bytes(r"\777"), b"\xff");
 }
 
 #[test]

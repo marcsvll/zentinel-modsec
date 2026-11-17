@@ -35,7 +35,7 @@ fn first_match(rules: &str, id: &str, drive: impl Fn(&mut zentinel_modsec::Trans
     tx.matched_data()
         .iter()
         .find(|d| d.rule_id.as_deref() == Some(id))
-        .map(|d| d.variable.clone())
+        .map(|d| String::from_utf8_lossy(&d.variable).into_owned())
         .unwrap_or_else(|| panic!("rule {id} should have matched"))
 }
 
@@ -58,7 +58,7 @@ fn request_headers_are_evaluated_in_request_order() {
         first_match(rules, "1", |tx| {
             tx.process_uri("/", "GET", "HTTP/1.1").unwrap();
             for i in 0..KEYS {
-                tx.add_request_header(&key(i), &format!("v{i}")).unwrap();
+                tx.add_request_header(key(i), format!("v{i}")).unwrap();
             }
             tx.process_request_headers().unwrap();
         })
@@ -75,7 +75,7 @@ fn request_headers_names_are_evaluated_in_request_order() {
         first_match(rules, "1", |tx| {
             tx.process_uri("/", "GET", "HTTP/1.1").unwrap();
             for i in 0..KEYS {
-                tx.add_request_header(&key(i), "x").unwrap();
+                tx.add_request_header(key(i), "x").unwrap();
             }
             tx.process_request_headers().unwrap();
         })

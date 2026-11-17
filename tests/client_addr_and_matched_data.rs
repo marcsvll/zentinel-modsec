@@ -130,11 +130,11 @@ fn matched_data_reports_the_variable_and_value() {
     let data = tx.matched_data();
     assert_eq!(data.len(), 1, "one match expected, got {data:?}");
     assert_eq!(data[0].rule_id.as_deref(), Some("942100"));
-    assert_eq!(data[0].variable, "ARGS:q");
+    assert_eq!(data[0].variable, b"ARGS:q");
     // The variable's value, matching what MATCHED_VAR resolves to...
-    assert_eq!(data[0].value, "something-evil-here");
+    assert_eq!(data[0].value, b"something-evil-here");
     // ...and separately the portion the operator actually hit.
-    assert_eq!(data[0].matched_portion.as_deref(), Some("evil"));
+    assert_eq!(data[0].matched_portion.as_deref(), Some(&b"evil"[..]));
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn matched_data_names_the_specific_collection_member() {
     let data = tx.matched_data();
     assert_eq!(data.len(), 1);
     assert_eq!(
-        data[0].variable, "ARGS:payload",
+        data[0].variable, b"ARGS:payload",
         "the matching member should be named, got {:?}",
         data[0].variable
     );
@@ -228,7 +228,7 @@ fn matched_data_accumulates_across_several_rules() {
     let data = tx.matched_data();
     assert_eq!(data.len(), 2, "got {data:?}");
     assert_eq!(data[0].rule_id.as_deref(), Some("1"));
-    assert_eq!(data[0].variable, "ARGS:a");
+    assert_eq!(data[0].variable, b"ARGS:a");
     assert_eq!(data[1].rule_id.as_deref(), Some("2"));
-    assert_eq!(data[1].variable, "ARGS:b");
+    assert_eq!(data[1].variable, b"ARGS:b");
 }

@@ -16,8 +16,8 @@ use crate::actions::{
     execute_actions, ActionResult, DisruptiveOutcome, FlowOutcome, SetVarOp, SetVarOperation,
 };
 use crate::error::Result;
-use crate::operators::{compile_operator, Operator};
-use crate::parser::{Action, DataAction, FlowAction, OperatorName, OperatorSpec};
+use crate::operators::{compile_operator_with_bytes, Operator};
+use crate::parser::{Action, DataAction, FlowAction};
 use crate::variables::{
     is_excluded, Collection, MutableCollection, RequestData, ResponseData, TxCollection,
     VariableResolver,
@@ -66,9 +66,9 @@ pub struct Transaction {
     /// Allow flag (skip further processing).
     allowed: bool,
     /// Matched variables for current rule evaluation.
-    matched_vars: Vec<(String, String)>,
+    matched_vars: Vec<(Vec<u8>, Vec<u8>)>,
     /// Regex captures from last match.
-    captures: Vec<String>,
+    captures: Vec<Vec<u8>>,
     /// Per-transaction `ctl:` overrides.
     controls: TransactionControls,
     /// Every variable that caused a rule to match, in order.
@@ -85,22 +85,26 @@ pub struct Transaction {
 /// The variable a rule matched on.
 #[derive(Debug, Clone)]
 struct MatchedVariable {
-    name: String,
-    value: String,
-    portion: Option<String>,
+    name: Vec<u8>,
+    value: Vec<u8>,
+    portion: Option<Vec<u8>>,
 }
+
+/// A variable's name, its value and, for a value shared by the phase, where
+/// it is kept.
+type NamedValue<'a> = (Cow<'a, [u8]>, Cow<'a, [u8]>, Option<ValueAt>);
 
 /// Result of evaluating one rule.
 struct RuleOutcome {
     matched: bool,
     /// The last match's captures (what a following chain link sees as TX:0..9).
-    captures: Vec<String>,
+    captures: Vec<Vec<u8>>,
     /// Every variable the operator matched, with that match's captures, in
     /// order. ModSecurity runs a rule's `capture` and `setvar` once per matched
     /// variable (CRS 920450 collects one `tx.header_name_920450_<name>` per
     /// request header; 922150 counts content types), so the transaction replays
     /// the non-disruptive actions over this list.
-    matches: Vec<(MatchedVariable, Vec<String>)>,
+    matches: Vec<(MatchedVariable, Vec<Vec<u8>>)>,
 }
 
 impl RuleOutcome {
@@ -123,16 +127,9 @@ pub const MATCHED_DATA_PER_RULE: usize = 16;
 pub const MATCHED_DATA_VALUE_BYTES: usize = 2048;
 
 /// A value as the record of a match keeps it: whole when short, otherwise its
-/// first [`MATCHED_DATA_VALUE_BYTES`] bytes, cut at a character boundary.
-fn kept_for_the_record(value: &str) -> String {
-    if value.len() <= MATCHED_DATA_VALUE_BYTES {
-        return value.to_string();
-    }
-    let mut end = MATCHED_DATA_VALUE_BYTES;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_string()
+/// first [`MATCHED_DATA_VALUE_BYTES`] bytes.
+fn kept_for_the_record(value: &[u8]) -> Vec<u8> {
+    value[..value.len().min(MATCHED_DATA_VALUE_BYTES)].to_vec()
 }
 
 /// What a rule matched on.
@@ -155,19 +152,20 @@ pub struct MatchedData {
     pub link: usize,
     /// The rule has `capture`, so this match set `TX:0`..`TX:9`.
     pub captured: bool,
-    /// Name of the variable that matched, e.g. `ARGS:json.q`.
-    pub variable: String,
+    /// Name of the variable that matched, e.g. `ARGS:json.q`. Bytes, as the
+    /// request sent the name: an argument name need not be UTF-8.
+    pub variable: Vec<u8>,
     /// The variable's value, after transformations were applied.
     ///
     /// This is what `MATCHED_VAR` resolves to -- the whole value, not the
     /// portion the operator hit -- up to [`MATCHED_DATA_VALUE_BYTES`].
-    pub value: String,
+    pub value: Vec<u8>,
     /// The portion of the value the operator matched, when it reports one.
     ///
     /// `@contains evil` against `something-evil-here` gives `evil` here and
     /// the full string in `value`. Operators that match the whole value, or
     /// do not report a portion, leave this `None`.
-    pub matched_portion: Option<String>,
+    pub matched_portion: Option<Vec<u8>>,
 }
 
 impl Transaction {
@@ -235,17 +233,26 @@ impl Transaction {
         &self.matched_data
     }
 
-    /// Process the request URI.
-    pub fn process_uri(&mut self, uri: &str, method: &str, protocol: &str) -> Result<()> {
-        self.request.set_uri(uri);
+    /// Process the request URI. The URI is bytes, as it arrived.
+    pub fn process_uri(
+        &mut self,
+        uri: impl AsRef<[u8]>,
+        method: &str,
+        protocol: &str,
+    ) -> Result<()> {
+        self.request.set_uri(uri.as_ref());
         self.request.set_method(method);
         self.request.set_protocol(protocol);
         Ok(())
     }
 
-    /// Add a request header.
-    pub fn add_request_header(&mut self, name: &str, value: &str) -> Result<()> {
-        self.request.add_header(name, value);
+    /// Add a request header. Name and value are bytes, as they arrived.
+    pub fn add_request_header(
+        &mut self,
+        name: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+    ) -> Result<()> {
+        self.request.add_header(name.as_ref(), value.as_ref());
         Ok(())
     }
 
@@ -257,11 +264,10 @@ impl Transaction {
         // 1: CRS 920400 chains it with Content-Length to refuse an upload that
         // is too large before the body arrives. The body parser sets it again
         // (a ctl:requestBodyProcessor may change it).
-        let content_type: Option<String> = self
-            .request
-            .headers
-            .get("content-type")
-            .and_then(|v| v.first().map(|s| s.to_ascii_lowercase()));
+        let content_type: Option<String> = self.request.headers.get("content-type").and_then(|v| {
+            v.first()
+                .map(|s| String::from_utf8_lossy(s).to_ascii_lowercase())
+        });
         if let Some(ct_lower) = content_type {
             let processor = if ct_lower.starts_with("multipart/form-data") {
                 "MULTIPART"
@@ -294,7 +300,7 @@ impl Transaction {
             .request
             .headers
             .get("content-type")
-            .and_then(|v| v.first().map(|s| s.to_string()));
+            .and_then(|v| v.first().map(|s| String::from_utf8_lossy(s).into_owned()));
         let ct_lower = content_type
             .as_deref()
             .map(|ct| ct.trim_start().to_ascii_lowercase())
@@ -397,9 +403,13 @@ impl Transaction {
         }
     }
 
-    /// Add a response header.
-    pub fn add_response_header(&mut self, name: &str, value: &str) -> Result<()> {
-        self.response.add_header(name, value);
+    /// Add a response header. Name and value are bytes, as they arrived.
+    pub fn add_response_header(
+        &mut self,
+        name: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+    ) -> Result<()> {
+        self.response.add_header(name.as_ref(), value.as_ref());
         Ok(())
     }
 
@@ -855,7 +865,7 @@ impl Transaction {
             // MATCHED_VAR is the value the previous rule matched on. This was
             // a literal `None`, so a rule reading MATCHED_VAR could never
             // fire, however many rules had matched before it.
-            self.matched_vars.last().map(|(_, value)| value.as_str()),
+            self.matched_vars.last().map(|(_, value)| value.as_slice()),
             &self.matched_vars,
             &self.captures,
         );
@@ -889,16 +899,16 @@ impl Transaction {
         let resolved_values: &Resolved = resolved;
 
         // Name, value and, for a value shared by the phase, where it is kept.
-        let mut all_values: Vec<(Cow<'_, str>, Cow<'_, str>, Option<ValueAt>)> = Vec::new();
+        let mut all_values: Vec<NamedValue<'_>> = Vec::new();
         let mut any_excluded = false;
         for spec in &rule.variables {
             let slot = resolved_values.slot(spec);
-            let resolved: Cow<'_, [(String, String)]> = match slot {
+            let resolved: Cow<'_, [(Vec<u8>, Vec<u8>)]> = match slot {
                 Some(slot) => Cow::Borrowed(resolved_values.values(slot)),
                 None => Cow::Owned(resolver.resolve_unfiltered(spec)),
             };
             let mut count = 0usize;
-            let mut keep = |name: &str| {
+            let mut keep = |name: &[u8]| {
                 if !spec.exclusions.is_empty() && is_excluded(spec, name) {
                     return false;
                 }
@@ -938,8 +948,8 @@ impl Transaction {
                 // An exclusion reduces the count, which is what a rule like
                 // `SecRule &ARGS:x "@eq 0"` is asking about.
                 all_values.push((
-                    Cow::Owned(format!("&{:?}", spec.name)),
-                    Cow::Owned(count.to_string()),
+                    Cow::Owned(format!("&{:?}", spec.name).into_bytes()),
+                    Cow::Owned(count.to_string().into_bytes()),
                     None,
                 ));
             }
@@ -971,11 +981,7 @@ impl Transaction {
                 // as the match target.
                 return Ok(RuleOutcome {
                     matched,
-                    captures: result
-                        .captures
-                        .iter()
-                        .map(|c| String::from_utf8_lossy(c).into_owned())
-                        .collect(),
+                    captures: result.captures,
                     matches: Vec::new(),
                 });
             }
@@ -999,11 +1005,7 @@ impl Transaction {
         let dynamic_operator;
         let operator: &dyn Operator = if rule.operator_spec.argument.contains("%{") {
             let expanded = self.expand_operator_macros(&rule.operator_spec.argument);
-            dynamic_operator = compile_operator(&OperatorSpec {
-                negated: rule.operator_spec.negated,
-                name: rule.operator_spec.name,
-                argument: expanded,
-            })?;
+            dynamic_operator = compile_operator_with_bytes(rule.operator_spec.name, &expanded)?;
             dynamic_operator.as_ref()
         } else {
             rule.operator.as_ref()
@@ -1021,26 +1023,8 @@ impl Transaction {
             t.operator_compile_ns = nanos(start.elapsed());
         }
         let multi_match = has_multi_match(rule);
-        // Argument values are `String`s, so bytes that were not valid UTF-8 are
-        // already replaced by the time an operator sees them; the request
-        // remembers which arguments had them, and that is what
-        // @validateUtf8Encoding reports (CRS 920250).
-        let utf8_validator = matches!(rule.operator_spec.name, OperatorName::ValidateUtf8Encoding);
-        let mut matches: Vec<(MatchedVariable, Vec<String>)> = Vec::new();
+        let mut matches: Vec<(MatchedVariable, Vec<Vec<u8>>)> = Vec::new();
         for (name, value, at) in all_values {
-            if utf8_validator && self.request.has_invalid_utf8(&name) {
-                if !rule.operator_negated {
-                    matches.push((
-                        MatchedVariable {
-                            name: name.into_owned(),
-                            value: value.into_owned(),
-                            portion: Some("invalid UTF-8 encoding".to_string()),
-                        },
-                        Vec::new(),
-                    ));
-                }
-                continue;
-            }
             let transform_start = timing.is_some().then(Instant::now);
             // What the operator runs against: every step with `multiMatch`,
             // otherwise the value through the whole chain. A value the phase
@@ -1050,7 +1034,7 @@ impl Transaction {
             let candidates: &[Cow<'_, [u8]>] = if multi_match {
                 steps = rule
                     .transformations
-                    .apply_steps(value.as_bytes())
+                    .apply_steps(&value)
                     .into_iter()
                     .map(Cow::Owned)
                     .collect();
@@ -1058,9 +1042,9 @@ impl Transaction {
             } else {
                 whole = [match (at, &value) {
                     (Some(at), Cow::Borrowed(shared)) => {
-                        transformed.apply(at, &rule.transformations, shared.as_bytes())
+                        transformed.apply(at, &rule.transformations, shared)
                     }
-                    _ => rule.transformations.apply(value.as_bytes()),
+                    _ => rule.transformations.apply(&value),
                 }];
                 &whole
             };
@@ -1082,23 +1066,16 @@ impl Transaction {
 
                 if final_match {
                     let matched = MatchedVariable {
-                        name: name.to_string(),
+                        name: name.to_vec(),
                         // ModSecurity's MATCHED_VAR is the *variable's* value,
                         // not the portion the operator hit. The portion is
                         // reported separately, since an audit log wants both:
                         // the value to judge the match, the portion to see what
                         // triggered it.
-                        value: String::from_utf8_lossy(candidate).into_owned(),
-                        portion: result
-                            .matched_value
-                            .map(|p| String::from_utf8_lossy(&p).into_owned()),
+                        value: candidate.to_vec(),
+                        portion: result.matched_value,
                     };
-                    let captures = result
-                        .captures
-                        .iter()
-                        .map(|c| String::from_utf8_lossy(c).into_owned())
-                        .collect();
-                    matches.push((matched, captures));
+                    matches.push((matched, result.captures));
                     break;
                 }
             }
@@ -1116,7 +1093,7 @@ impl Transaction {
 
     /// Publish a `capture` result as `TX:0` (the whole match) and `TX:1..TX:9`
     /// (the groups), replacing the previous rule's captures.
-    fn store_captures(&mut self, full: Option<String>, groups: &[String]) {
+    fn store_captures(&mut self, full: Option<Vec<u8>>, groups: &[Vec<u8>]) {
         for i in 0..10usize {
             let key = i.to_string();
             let value = if i == 0 {
@@ -1137,32 +1114,34 @@ impl Transaction {
     /// `MATCHED_VAR`, `MATCHED_VAR_NAME`, `REMOTE_ADDR`, `request_headers.<name>`
     /// and `args.<name>`. An unresolved macro expands to the empty string,
     /// matching ModSecurity behaviour.
-    fn expand_operator_macros(&self, arg: &str) -> String {
+    fn expand_operator_macros(&self, arg: &str) -> Vec<u8> {
         // Compiled once: this runs on every evaluation of an operator whose
         // argument contains `%{`.
         static MACRO: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
             regex::Regex::new(r"%\{([^}]+)\}").expect("static macro regex is valid")
         });
-        MACRO
-            .replace_all(arg, |caps: &regex::Captures| {
-                let inner = &caps[1];
-                if inner.eq_ignore_ascii_case("MATCHED_VAR") {
-                    return self
-                        .matched_vars
-                        .last()
-                        .map(|(_, v)| v.clone())
-                        .unwrap_or_default();
-                }
-                if inner.eq_ignore_ascii_case("MATCHED_VAR_NAME") {
-                    return self
-                        .matched_vars
-                        .last()
-                        .map(|(n, _)| n.clone())
-                        .unwrap_or_default();
-                }
-                if inner.eq_ignore_ascii_case("REMOTE_ADDR") {
-                    return self.request.client_ip.clone();
-                }
+        // What a macro expands to is request data, so bytes; the text around
+        // it is the rule's.
+        let mut out = Vec::with_capacity(arg.len());
+        let mut last = 0;
+        for caps in MACRO.captures_iter(arg) {
+            let whole = caps.get(0).expect("group 0 always participates");
+            out.extend_from_slice(&arg.as_bytes()[last..whole.start()]);
+            last = whole.end();
+            let inner = &caps[1];
+            let value: Vec<u8> = if inner.eq_ignore_ascii_case("MATCHED_VAR") {
+                self.matched_vars
+                    .last()
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default()
+            } else if inner.eq_ignore_ascii_case("MATCHED_VAR_NAME") {
+                self.matched_vars
+                    .last()
+                    .map(|(n, _)| n.clone())
+                    .unwrap_or_default()
+            } else if inner.eq_ignore_ascii_case("REMOTE_ADDR") {
+                self.request.client_ip.clone().into_bytes()
+            } else {
                 let (collection, name) = match inner.split_once(['.', ':']) {
                     Some((c, n)) => (c.to_ascii_lowercase(), n),
                     None => ("tx".to_string(), inner),
@@ -1170,7 +1149,7 @@ impl Transaction {
                 match collection.as_str() {
                     "tx" => first_value(self.tx.get(name)),
                     "request_headers" => {
-                        first_value(self.request.headers.get(&name.to_ascii_lowercase()))
+                        first_value(self.request.headers.get(name.to_ascii_lowercase()))
                     }
                     "args" => first_value(
                         self.request
@@ -1178,10 +1157,13 @@ impl Transaction {
                             .get(name)
                             .or_else(|| self.request.args_post.get(name)),
                     ),
-                    _ => String::new(),
+                    _ => Vec::new(),
                 }
-            })
-            .into_owned()
+            };
+            out.extend_from_slice(&value);
+        }
+        out.extend_from_slice(&arg.as_bytes()[last..]);
+        out
     }
 
     /// Apply a setvar operation. Macros are expanded in the value
@@ -1191,25 +1173,22 @@ impl Transaction {
         let name = if op.name.contains("%{") {
             self.expand_operator_macros(&op.name)
         } else {
-            op.name.clone()
+            op.name.clone().into_bytes()
         };
         match &op.operation {
             SetVarOperation::Macro(raw) => {
                 // The operation is the rule's (`=`, `=+`, `=-`); only the
                 // operand is expanded, so a request cannot choose it.
-                let operation = if let Some(operand) = raw.strip_prefix('+') {
-                    SetVarOperation::Increment(leading_int(&self.expand_operator_macros(operand)))
+                if let Some(operand) = raw.strip_prefix('+') {
+                    let delta = leading_int(&self.expand_operator_macros(operand));
+                    self.tx.increment(&name, delta);
                 } else if let Some(operand) = raw.strip_prefix('-') {
-                    SetVarOperation::Decrement(leading_int(&self.expand_operator_macros(operand)))
+                    let delta = leading_int(&self.expand_operator_macros(operand));
+                    self.tx.decrement(&name, delta);
                 } else {
-                    SetVarOperation::Set(self.expand_operator_macros(raw))
-                };
-                let resolved = SetVarOp {
-                    collection: op.collection.clone(),
-                    name: name.clone(),
-                    operation,
-                };
-                crate::actions::apply_setvar(&mut self.tx, &resolved);
+                    let value = self.expand_operator_macros(raw);
+                    self.tx.set(name.clone(), value);
+                }
             }
             SetVarOperation::Set(value) => self.tx.set(name.clone(), value.clone()),
             SetVarOperation::Increment(delta) => self.tx.increment(&name, *delta),
@@ -1218,16 +1197,16 @@ impl Transaction {
         }
 
         // Sync anomaly score from TX if relevant
-        if name == "anomaly_score" {
+        if name == b"anomaly_score" {
             self.anomaly_score.sync_from_tx(&self.tx);
         }
     }
 }
 
-/// First value of a collection lookup, or the empty string.
-fn first_value(values: Option<Vec<&str>>) -> String {
+/// First value of a collection lookup, or nothing.
+fn first_value(values: Option<Vec<&[u8]>>) -> Vec<u8> {
     values
-        .and_then(|v| v.first().map(|s| (*s).to_string()))
+        .and_then(|v| v.first().map(|s| s.to_vec()))
         .unwrap_or_default()
 }
 
@@ -1247,14 +1226,21 @@ fn has_capture(rule: &CompiledRule) -> bool {
 /// A `setvar` operand as libmodsecurity reads it (`stoi`, or 0 when that
 /// fails): leading whitespace, an optional sign, then digits up to the first
 /// character that is not one.
-fn leading_int(operand: &str) -> i64 {
-    let s = operand.trim_start();
-    let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
+fn leading_int(operand: &[u8]) -> i64 {
+    let s = operand.trim_ascii_start();
+    let digits = s
+        .strip_prefix(b"+")
+        .or_else(|| s.strip_prefix(b"-"))
+        .unwrap_or(s);
     let end = s.len() - digits.len()
         + digits
-            .find(|c: char| !c.is_ascii_digit())
+            .iter()
+            .position(|b| !b.is_ascii_digit())
             .unwrap_or(digits.len());
-    s[..end].parse().unwrap_or(0)
+    std::str::from_utf8(&s[..end])
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
 }
 
 impl std::fmt::Debug for Transaction {
@@ -1324,7 +1310,7 @@ mod tests {
         let score = tx
             .tx()
             .get("score")
-            .and_then(|v| v.first().map(|s| s.to_string()));
+            .and_then(|v| v.first().map(|s| String::from_utf8_lossy(s).into_owned()));
         assert_eq!(score, Some("5".to_string()));
     }
 
@@ -1412,7 +1398,7 @@ mod tests {
         let threshold = tx
             .tx()
             .get("threshold")
-            .and_then(|v| v.first().map(|s| s.to_string()));
+            .and_then(|v| v.first().map(|s| String::from_utf8_lossy(s).into_owned()));
         assert_eq!(
             threshold,
             Some("5".to_string()),
@@ -1453,7 +1439,7 @@ mod tests {
         let score = tx
             .tx()
             .get("anomaly_score")
-            .and_then(|v| v.first().map(|s| s.to_string()));
+            .and_then(|v| v.first().map(|s| String::from_utf8_lossy(s).into_owned()));
         assert_eq!(
             score,
             Some("10".to_string()),
@@ -1475,7 +1461,7 @@ mod tests {
         let score = tx
             .tx()
             .get("anomaly_score")
-            .and_then(|v| v.first().map(|s| s.to_string()));
+            .and_then(|v| v.first().map(|s| String::from_utf8_lossy(s).into_owned()));
         assert_eq!(
             score,
             Some("0".to_string()),
@@ -1549,7 +1535,7 @@ mod tests {
     fn tx_var(tx: &Transaction, key: &str) -> Option<String> {
         tx.tx()
             .get(key)
-            .and_then(|v| v.first().map(|s| s.to_string()))
+            .and_then(|v| v.first().map(|s| String::from_utf8_lossy(s).into_owned()))
     }
 
     #[test]

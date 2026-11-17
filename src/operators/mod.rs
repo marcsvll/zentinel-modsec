@@ -81,6 +81,39 @@ pub fn compile_operator(spec: &OperatorSpec) -> Result<Arc<dyn Operator>> {
     }
 }
 
+/// Compile an operator whose argument was built at run time: a macro in it
+/// (`@streq %{request_headers.host}`, `@ge %{tx.threshold}`) was expanded
+/// against the transaction, so the argument is request data, as bytes. Only
+/// comparisons take a macro (loading refuses one elsewhere); any other
+/// operator gets the argument as text.
+pub fn compile_operator_with_bytes(
+    name: OperatorName,
+    argument: &[u8],
+) -> Result<Arc<dyn Operator>> {
+    Ok(match name {
+        OperatorName::Contains | OperatorName::ContainsWord | OperatorName::StrMatch => {
+            Arc::new(ContainsOperator::new(argument))
+        }
+        OperatorName::BeginsWith => Arc::new(BeginsWithOperator::new(argument)),
+        OperatorName::EndsWith => Arc::new(EndsWithOperator::new(argument)),
+        OperatorName::StreQ => Arc::new(StreqOperator::new(argument)),
+        OperatorName::Eq => Arc::new(EqOperator::new(argument)),
+        OperatorName::Gt => Arc::new(GtOperator::new(argument)),
+        OperatorName::Lt => Arc::new(LtOperator::new(argument)),
+        OperatorName::Ge => Arc::new(GeOperator::new(argument)),
+        OperatorName::Le => Arc::new(LeOperator::new(argument)),
+        OperatorName::Within => Arc::new(WithinOperator::new(argument)),
+        OperatorName::Ne => Arc::new(NeOperator::new(argument)),
+        other => {
+            return compile_operator(&OperatorSpec {
+                negated: false,
+                name: other,
+                argument: String::from_utf8_lossy(argument).into_owned(),
+            })
+        }
+    })
+}
+
 /// Operator that never matches.
 pub struct NoMatchOperator;
 

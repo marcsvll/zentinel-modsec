@@ -9,9 +9,9 @@ mod resolver;
 mod response;
 mod tx;
 
-pub use collection::{Collection, HashMapCollection, MutableCollection};
+pub use collection::{first_number, Collection, HashMapCollection, MutableCollection};
 pub use request::RequestData;
 pub(crate) use resolver::is_excluded;
-pub use resolver::VariableResolver;
+pub use resolver::{Vals, VariableResolver};
 pub use response::ResponseData;
 pub use tx::TxCollection;

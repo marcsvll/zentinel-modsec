@@ -3,7 +3,7 @@
 use super::{RequestData, ResponseData, TxCollection};
 use crate::parser::{Selection, VariableName, VariableSpec, XmlTarget};
 use once_cell::sync::Lazy;
-use regex::Regex;
+use regex::bytes::Regex;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -38,17 +38,35 @@ fn cached_regex(pattern: &str) -> Option<Arc<Regex>> {
         .clone()
 }
 
+/// Resolved variables: the name each value is known by (`ARGS:q`) and the
+/// value, both as bytes.
+pub type Vals = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// One resolved variable that is not a collection member.
+fn named(name: &str, value: impl Into<Vec<u8>>) -> Vals {
+    vec![(name.as_bytes().to_vec(), value.into())]
+}
+
+/// `PREFIX:key`.
+fn qualified(prefix: &str, key: &[u8]) -> Vec<u8> {
+    let mut name = Vec::with_capacity(prefix.len() + 1 + key.len());
+    name.extend_from_slice(prefix.as_bytes());
+    name.push(b':');
+    name.extend_from_slice(key);
+    name
+}
+
 /// Variable resolver for transaction context.
 pub struct VariableResolver<'a> {
     request: &'a RequestData,
     response: &'a ResponseData,
     tx: &'a TxCollection,
-    matched_var: Option<&'a str>,
-    matched_vars: &'a [(String, String)],
+    matched_var: Option<&'a [u8]>,
+    matched_vars: &'a [(Vec<u8>, Vec<u8>)],
     /// Carried alongside the other resolver inputs for symmetry; no variable
     /// reads it yet (`TX:0`..`TX:9` are served from the TX collection).
     #[allow(dead_code)]
-    captures: &'a [String],
+    captures: &'a [Vec<u8>],
 }
 
 impl<'a> VariableResolver<'a> {
@@ -57,9 +75,9 @@ impl<'a> VariableResolver<'a> {
         request: &'a RequestData,
         response: &'a ResponseData,
         tx: &'a TxCollection,
-        matched_var: Option<&'a str>,
-        matched_vars: &'a [(String, String)],
-        captures: &'a [String],
+        matched_var: Option<&'a [u8]>,
+        matched_vars: &'a [(Vec<u8>, Vec<u8>)],
+        captures: &'a [Vec<u8>],
     ) -> Self {
         Self {
             request,
@@ -72,7 +90,7 @@ impl<'a> VariableResolver<'a> {
     }
 
     /// Resolve a variable specification to values.
-    pub fn resolve(&self, spec: &VariableSpec) -> Vec<(String, String)> {
+    pub fn resolve(&self, spec: &VariableSpec) -> Vals {
         let values = self.resolve_unfiltered(spec);
 
         // Apply exclusions
@@ -88,42 +106,22 @@ impl<'a> VariableResolver<'a> {
 
     /// The values a specification selects, before its exclusions
     /// (`!ARGS:x`): what rules naming the same variable have in common.
-    pub(crate) fn resolve_unfiltered(&self, spec: &VariableSpec) -> Vec<(String, String)> {
+    pub(crate) fn resolve_unfiltered(&self, spec: &VariableSpec) -> Vals {
         self.resolve_variable(spec.name, &spec.selection)
     }
 
     /// Resolve a variable by name.
-    fn resolve_variable(
-        &self,
-        name: VariableName,
-        selection: &Option<Selection>,
-    ) -> Vec<(String, String)> {
+    fn resolve_variable(&self, name: VariableName, selection: &Option<Selection>) -> Vals {
         match name {
             // Request variables
-            VariableName::RequestUri => {
-                vec![("REQUEST_URI".to_string(), self.request.uri.clone())]
-            }
-            VariableName::RequestUriRaw => {
-                vec![("REQUEST_URI_RAW".to_string(), self.request.uri_raw.clone())]
-            }
-            VariableName::RequestMethod => {
-                vec![("REQUEST_METHOD".to_string(), self.request.method.clone())]
-            }
+            VariableName::RequestUri => named("REQUEST_URI", self.request.uri.clone()),
+            VariableName::RequestUriRaw => named("REQUEST_URI_RAW", self.request.uri_raw.clone()),
+            VariableName::RequestMethod => named("REQUEST_METHOD", self.request.method.clone()),
             VariableName::RequestProtocol => {
-                vec![(
-                    "REQUEST_PROTOCOL".to_string(),
-                    self.request.protocol.clone(),
-                )]
+                named("REQUEST_PROTOCOL", self.request.protocol.clone())
             }
-            VariableName::QueryString => {
-                vec![(
-                    "QUERY_STRING".to_string(),
-                    self.request.query_string.clone(),
-                )]
-            }
-            VariableName::RequestFilename => {
-                vec![("REQUEST_FILENAME".to_string(), self.request.path.clone())]
-            }
+            VariableName::QueryString => named("QUERY_STRING", self.request.query_string.clone()),
+            VariableName::RequestFilename => named("REQUEST_FILENAME", self.request.path.clone()),
             VariableName::RequestLine => {
                 // The request line as it arrived. CRS 920100 tests this with a
                 // negated regex, so leaving it unresolved made that rule match
@@ -133,10 +131,13 @@ impl<'a> VariableResolver<'a> {
                 } else {
                     &self.request.uri_raw
                 };
-                vec![(
-                    "REQUEST_LINE".to_string(),
-                    format!("{} {} {}", self.request.method, uri, self.request.protocol),
-                )]
+                let mut line = Vec::with_capacity(uri.len() + 16);
+                line.extend_from_slice(self.request.method.as_bytes());
+                line.push(b' ');
+                line.extend_from_slice(uri);
+                line.push(b' ');
+                line.extend_from_slice(self.request.protocol.as_bytes());
+                named("REQUEST_LINE", line)
             }
             VariableName::RequestBasename => {
                 // Final path segment. ModSecurity splits on both separators, so
@@ -144,11 +145,11 @@ impl<'a> VariableResolver<'a> {
                 let basename = self
                     .request
                     .path
-                    .rsplit(['/', '\\'])
+                    .rsplit(|&b| b == b'/' || b == b'\\')
                     .next()
-                    .unwrap_or("")
-                    .to_string();
-                vec![("REQUEST_BASENAME".to_string(), basename)]
+                    .unwrap_or_default()
+                    .to_vec();
+                named("REQUEST_BASENAME", basename)
             }
             VariableName::ArgsCombinedSize => {
                 use super::collection::Collection;
@@ -157,7 +158,7 @@ impl<'a> VariableResolver<'a> {
                     .flat_map(|c| c.all())
                     .map(|(name, value)| name.len() + value.len())
                     .sum();
-                vec![("ARGS_COMBINED_SIZE".to_string(), size.to_string())]
+                named("ARGS_COMBINED_SIZE", size.to_string())
             }
             VariableName::RequestBody => {
                 // ModSecurity v2 fills REQUEST_BODY only when the URLENCODED
@@ -170,15 +171,13 @@ impl<'a> VariableResolver<'a> {
                 if self.request.body_processor == "XML" {
                     vec![]
                 } else {
-                    vec![("REQUEST_BODY".to_string(), self.request.body_str())]
+                    named("REQUEST_BODY", self.request.body.clone())
                 }
             }
-            VariableName::RequestBodyLength => {
-                vec![(
-                    "REQUEST_BODY_LENGTH".to_string(),
-                    self.request.body_length().to_string(),
-                )]
-            }
+            VariableName::RequestBodyLength => named(
+                "REQUEST_BODY_LENGTH",
+                self.request.body_length().to_string(),
+            ),
 
             // Collections
             VariableName::Args => self.resolve_collection_from_all_args(selection),
@@ -237,9 +236,9 @@ impl<'a> VariableResolver<'a> {
                     .files_sizes
                     .all()
                     .into_iter()
-                    .filter_map(|(_, v)| v.parse::<u64>().ok())
+                    .filter_map(|(_, v)| std::str::from_utf8(v).ok()?.parse::<u64>().ok())
                     .sum();
-                vec![("FILES_COMBINED_SIZE".to_string(), total.to_string())]
+                named("FILES_COMBINED_SIZE", total.to_string())
             }
             VariableName::FilesNames => {
                 self.resolve_collection_names(&[&self.request.files], "FILES_NAMES", selection)
@@ -305,16 +304,13 @@ impl<'a> VariableResolver<'a> {
                     }
                     _ => ("MULTIPART_STRICT_ERROR", u8::from(m.strict_error())),
                 };
-                vec![(label.to_string(), value.to_string())]
+                named(label, value.to_string())
             }
             VariableName::ReqBodyProcessor => {
                 if self.request.body_processor.is_empty() {
                     vec![]
                 } else {
-                    vec![(
-                        "REQBODY_PROCESSOR".to_string(),
-                        self.request.body_processor.clone(),
-                    )]
+                    named("REQBODY_PROCESSOR", self.request.body_processor.clone())
                 }
             }
 
@@ -333,30 +329,22 @@ impl<'a> VariableResolver<'a> {
                 } else {
                     "0"
                 };
-                vec![("REQBODY_ERROR".to_string(), flag.to_string())]
+                named("REQBODY_ERROR", flag.to_string())
             }
             VariableName::ReqBodyErrorMsg | VariableName::ReqBodyProcessorErrorMsg => {
                 match &self.request.body_error {
-                    Some(msg) => vec![("REQBODY_ERROR_MSG".to_string(), msg.clone())],
+                    Some(msg) => named("REQBODY_ERROR_MSG", msg.clone()),
                     None => vec![],
                 }
             }
 
             // Response variables
             VariableName::ResponseStatus => {
-                vec![(
-                    "RESPONSE_STATUS".to_string(),
-                    self.response.status.to_string(),
-                )]
+                named("RESPONSE_STATUS", self.response.status.to_string())
             }
-            VariableName::ResponseBody => {
-                vec![("RESPONSE_BODY".to_string(), self.response.body_str())]
-            }
+            VariableName::ResponseBody => named("RESPONSE_BODY", self.response.body.clone()),
             VariableName::ResponseContentType => {
-                vec![(
-                    "RESPONSE_CONTENT_TYPE".to_string(),
-                    self.response.content_type.clone(),
-                )]
+                named("RESPONSE_CONTENT_TYPE", self.response.content_type.clone())
             }
             VariableName::ResponseHeaders => {
                 self.resolve_collection_ci(&self.response.headers, "RESPONSE_HEADERS", selection)
@@ -368,32 +356,16 @@ impl<'a> VariableResolver<'a> {
             VariableName::Tx => self.resolve_tx_collection(selection),
 
             // Client/Server info
-            VariableName::RemoteAddr => {
-                vec![("REMOTE_ADDR".to_string(), self.request.client_ip.clone())]
-            }
-            VariableName::RemotePort => {
-                vec![(
-                    "REMOTE_PORT".to_string(),
-                    self.request.client_port.to_string(),
-                )]
-            }
-            VariableName::ServerName => {
-                vec![("SERVER_NAME".to_string(), self.request.server_name.clone())]
-            }
-            VariableName::ServerAddr => {
-                vec![("SERVER_ADDR".to_string(), self.request.server_addr.clone())]
-            }
-            VariableName::ServerPort => {
-                vec![(
-                    "SERVER_PORT".to_string(),
-                    self.request.server_port.to_string(),
-                )]
-            }
+            VariableName::RemoteAddr => named("REMOTE_ADDR", self.request.client_ip.clone()),
+            VariableName::RemotePort => named("REMOTE_PORT", self.request.client_port.to_string()),
+            VariableName::ServerName => named("SERVER_NAME", self.request.server_name.clone()),
+            VariableName::ServerAddr => named("SERVER_ADDR", self.request.server_addr.clone()),
+            VariableName::ServerPort => named("SERVER_PORT", self.request.server_port.to_string()),
 
             // Matched variables
             VariableName::MatchedVar => {
                 if let Some(v) = self.matched_var {
-                    vec![("MATCHED_VAR".to_string(), v.to_string())]
+                    named("MATCHED_VAR", v)
                 } else {
                     vec![]
                 }
@@ -401,16 +373,16 @@ impl<'a> VariableResolver<'a> {
             VariableName::MatchedVars => self
                 .matched_vars
                 .iter()
-                .map(|(k, v)| (format!("MATCHED_VARS:{}", k), v.clone()))
+                .map(|(k, v)| (qualified("MATCHED_VARS", k), v.clone()))
                 .collect(),
             VariableName::MatchedVarName => match self.matched_vars.last() {
-                Some((name, _)) => vec![("MATCHED_VAR_NAME".to_string(), name.clone())],
+                Some((name, _)) => named("MATCHED_VAR_NAME", name.clone()),
                 None => vec![],
             },
             VariableName::MatchedVarsNames => self
                 .matched_vars
                 .iter()
-                .map(|(k, _)| (format!("MATCHED_VARS_NAMES:{}", k), k.clone()))
+                .map(|(k, _)| (qualified("MATCHED_VARS_NAMES", k), k.clone()))
                 .collect(),
 
             // Default - empty
@@ -424,7 +396,7 @@ impl<'a> VariableResolver<'a> {
         collection: &super::collection::HashMapCollection,
         prefix: &str,
         selection: &Option<Selection>,
-    ) -> Vec<(String, String)> {
+    ) -> Vals {
         self.resolve_collection_inner(collection, prefix, selection, false)
     }
 
@@ -434,7 +406,7 @@ impl<'a> VariableResolver<'a> {
         collection: &super::collection::HashMapCollection,
         prefix: &str,
         selection: &Option<Selection>,
-    ) -> Vec<(String, String)> {
+    ) -> Vals {
         self.resolve_collection_inner(collection, prefix, selection, true)
     }
 
@@ -444,7 +416,7 @@ impl<'a> VariableResolver<'a> {
         prefix: &str,
         selection: &Option<Selection>,
         lowercase_key: bool,
-    ) -> Vec<(String, String)> {
+    ) -> Vals {
         use super::collection::Collection;
 
         match selection {
@@ -457,7 +429,7 @@ impl<'a> VariableResolver<'a> {
                 if let Some(values) = collection.get(&lookup) {
                     values
                         .into_iter()
-                        .map(|v| (format!("{}:{}", prefix, key), v.to_string()))
+                        .map(|v| (qualified(prefix, key.as_bytes()), v.to_vec()))
                         .collect()
                 } else {
                     vec![]
@@ -468,7 +440,7 @@ impl<'a> VariableResolver<'a> {
                     collection
                         .get_regex(&re)
                         .into_iter()
-                        .map(|(k, v)| (format!("{}:{}", prefix, k), v.to_string()))
+                        .map(|(k, v)| (qualified(prefix, k), v.to_vec()))
                         .collect()
                 } else {
                     vec![]
@@ -477,7 +449,7 @@ impl<'a> VariableResolver<'a> {
             None => collection
                 .all()
                 .into_iter()
-                .map(|(k, v)| (format!("{}:{}", prefix, k), v.to_string()))
+                .map(|(k, v)| (qualified(prefix, k), v.to_vec()))
                 .collect(),
         }
     }
@@ -490,7 +462,7 @@ impl<'a> VariableResolver<'a> {
     /// value; the XML body processor collects exactly those two sets, so no
     /// XPath is evaluated. Values are reported under the selector that
     /// addressed them, so `%{MATCHED_VAR_NAME}` reads `XML:/*` or `XML://@*`.
-    fn resolve_xml(&self, selection: &Option<Selection>) -> Vec<(String, String)> {
+    fn resolve_xml(&self, selection: &Option<Selection>) -> Vals {
         let Some(target) = XmlTarget::from_selection(selection.as_ref()) else {
             // An XPath expression this engine cannot express. Reported when the
             // rules load, so there is nothing to say per request.
@@ -500,12 +472,12 @@ impl<'a> VariableResolver<'a> {
             .request
             .xml_text
             .iter()
-            .map(|v| ("XML:/*".to_string(), v.clone()));
+            .map(|v| (b"XML:/*".to_vec(), v.clone()));
         let attributes = self
             .request
             .xml_attributes
             .iter()
-            .map(|v| ("XML://@*".to_string(), v.clone()));
+            .map(|v| (b"XML://@*".to_vec(), v.clone()));
         match target {
             XmlTarget::Elements => text.collect(),
             XmlTarget::Attributes => attributes.collect(),
@@ -513,10 +485,7 @@ impl<'a> VariableResolver<'a> {
         }
     }
 
-    fn resolve_collection_from_all_args(
-        &self,
-        selection: &Option<Selection>,
-    ) -> Vec<(String, String)> {
+    fn resolve_collection_from_all_args(&self, selection: &Option<Selection>) -> Vals {
         let mut result = self.resolve_collection(&self.request.args_get, "ARGS", selection);
         result.extend(self.resolve_collection(&self.request.args_post, "ARGS", selection));
         result
@@ -530,21 +499,21 @@ impl<'a> VariableResolver<'a> {
         collections: &[&super::collection::HashMapCollection],
         prefix: &str,
         selection: &Option<Selection>,
-    ) -> Vec<(String, String)> {
+    ) -> Vals {
         use super::collection::Collection;
 
         let mut result = Vec::new();
         for collection in collections {
             for (key, _) in collection.all() {
                 let selected = match selection {
-                    Some(Selection::Key(sel)) => key.eq_ignore_ascii_case(sel),
+                    Some(Selection::Key(sel)) => key.eq_ignore_ascii_case(sel.as_bytes()),
                     Some(Selection::Regex(pattern)) => cached_regex(pattern)
                         .map(|re| re.is_match(key))
                         .unwrap_or(false),
                     None => true,
                 };
                 if selected {
-                    result.push((format!("{}:{}", prefix, key), key.to_string()));
+                    result.push((qualified(prefix, key), key.to_vec()));
                 }
             }
         }
@@ -552,7 +521,7 @@ impl<'a> VariableResolver<'a> {
     }
 
     /// Resolve TX collection.
-    fn resolve_tx_collection(&self, selection: &Option<Selection>) -> Vec<(String, String)> {
+    fn resolve_tx_collection(&self, selection: &Option<Selection>) -> Vals {
         use super::collection::Collection;
 
         match selection {
@@ -560,7 +529,7 @@ impl<'a> VariableResolver<'a> {
                 if let Some(values) = self.tx.get(key) {
                     values
                         .into_iter()
-                        .map(|v| (format!("TX:{}", key), v.to_string()))
+                        .map(|v| (qualified("TX", key.as_bytes()), v.to_vec()))
                         .collect()
                 } else {
                     vec![]
@@ -574,7 +543,7 @@ impl<'a> VariableResolver<'a> {
                     self.tx
                         .get_regex(&re)
                         .into_iter()
-                        .map(|(k, v)| (format!("TX:{}", k), v.to_string()))
+                        .map(|(k, v)| (qualified("TX", k), v.to_vec()))
                         .collect()
                 } else {
                     vec![]
@@ -584,7 +553,7 @@ impl<'a> VariableResolver<'a> {
                 .tx
                 .all()
                 .into_iter()
-                .map(|(k, v)| (format!("TX:{}", k), v.to_string()))
+                .map(|(k, v)| (qualified("TX", k), v.to_vec()))
                 .collect(),
         }
     }
@@ -592,7 +561,7 @@ impl<'a> VariableResolver<'a> {
 
 /// Whether a resolved variable key (e.g. `ARGS:password`) is left out by one of
 /// the specification's own exclusions.
-pub(crate) fn is_excluded(spec: &VariableSpec, key: &str) -> bool {
+pub(crate) fn is_excluded(spec: &VariableSpec, key: &[u8]) -> bool {
     spec.exclusions.iter().any(|e| exclusion_matches(key, e))
 }
 
@@ -604,13 +573,17 @@ pub(crate) fn is_excluded(spec: &VariableSpec, key: &str) -> bool {
 /// - `COLLECTION:key` — excludes that member (key compared case-insensitively);
 /// - `COLLECTION:/regex/` — excludes members whose key matches the regex;
 /// - `COLLECTION` — excludes the entire collection.
-fn exclusion_matches(key: &str, exclusion: &str) -> bool {
+fn exclusion_matches(key: &[u8], exclusion: &str) -> bool {
+    let (key_coll, key_member) = match key.iter().position(|&b| b == b':') {
+        Some(colon) => (&key[..colon], Some(&key[colon + 1..])),
+        None => (key, None),
+    };
     match exclusion.split_once(':') {
         Some((excl_coll, excl_sel)) => {
-            let Some((key_coll, key_member)) = key.split_once(':') else {
+            let Some(key_member) = key_member else {
                 return false;
             };
-            if !key_coll.eq_ignore_ascii_case(excl_coll) {
+            if !key_coll.eq_ignore_ascii_case(excl_coll.as_bytes()) {
                 return false;
             }
             if excl_sel.len() > 2 && excl_sel.starts_with('/') && excl_sel.ends_with('/') {
@@ -618,13 +591,10 @@ fn exclusion_matches(key: &str, exclusion: &str) -> bool {
                     .map(|re| re.is_match(key_member))
                     .unwrap_or(false)
             } else {
-                key_member.eq_ignore_ascii_case(excl_sel)
+                key_member.eq_ignore_ascii_case(excl_sel.as_bytes())
             }
         }
-        None => {
-            let key_coll = key.split_once(':').map(|(c, _)| c).unwrap_or(key);
-            key_coll.eq_ignore_ascii_case(exclusion)
-        }
+        None => key_coll.eq_ignore_ascii_case(exclusion.as_bytes()),
     }
 }
 
@@ -636,23 +606,23 @@ mod tests {
     fn test_cached_regex_compiles_once_and_keeps_invalid_patterns_dead() {
         let a = cached_regex(r"^user_\d+$").expect("valid pattern");
         let b = cached_regex(r"^user_\d+$").expect("valid pattern");
-        assert!(a.is_match("user_42") && b.is_match("user_42"));
+        assert!(a.is_match(b"user_42") && b.is_match(b"user_42"));
         // An invalid pattern stays a never-matching selection, cached or not.
         assert!(cached_regex("(unclosed").is_none());
         assert!(cached_regex("(unclosed").is_none());
-        assert!(!exclusion_matches("ARGS:x", "ARGS:/(unclosed/"));
+        assert!(!exclusion_matches(b"ARGS:x", "ARGS:/(unclosed/"));
     }
 
     #[test]
     fn test_exclusion_exact_key() {
-        assert!(exclusion_matches("ARGS:password", "ARGS:password"));
-        assert!(exclusion_matches("ARGS:Password", "ARGS:password"));
+        assert!(exclusion_matches(b"ARGS:password", "ARGS:password"));
+        assert!(exclusion_matches(b"ARGS:Password", "ARGS:password"));
         // Must NOT be a prefix/substring match.
-        assert!(!exclusion_matches("ARGS:password2", "ARGS:password"));
-        assert!(!exclusion_matches("ARGS:xpassword", "ARGS:password"));
+        assert!(!exclusion_matches(b"ARGS:password2", "ARGS:password"));
+        assert!(!exclusion_matches(b"ARGS:xpassword", "ARGS:password"));
         // Different collection.
         assert!(!exclusion_matches(
-            "REQUEST_COOKIES:password",
+            b"REQUEST_COOKIES:password",
             "ARGS:password"
         ));
     }
@@ -661,22 +631,22 @@ mod tests {
     fn test_exclusion_regex_key() {
         // CRS pattern: SecRuleUpdateTargetById 941100 "!REQUEST_COOKIES:/^_ga(?:_\w+)?$/"
         assert!(exclusion_matches(
-            "REQUEST_COOKIES:_ga_ABC123",
+            b"REQUEST_COOKIES:_ga_ABC123",
             r"REQUEST_COOKIES:/^_ga(?:_\w+)?$/"
         ));
         assert!(exclusion_matches(
-            "REQUEST_COOKIES:_ga",
+            b"REQUEST_COOKIES:_ga",
             r"REQUEST_COOKIES:/^_ga(?:_\w+)?$/"
         ));
         assert!(!exclusion_matches(
-            "REQUEST_COOKIES:session",
+            b"REQUEST_COOKIES:session",
             r"REQUEST_COOKIES:/^_ga(?:_\w+)?$/"
         ));
     }
 
     #[test]
     fn test_exclusion_whole_collection() {
-        assert!(exclusion_matches("ARGS:anything", "ARGS"));
-        assert!(!exclusion_matches("ARGS_NAMES:anything", "ARGS"));
+        assert!(exclusion_matches(b"ARGS:anything", "ARGS"));
+        assert!(!exclusion_matches(b"ARGS_NAMES:anything", "ARGS"));
     }
 }

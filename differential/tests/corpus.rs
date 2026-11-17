@@ -202,7 +202,7 @@ fn what_the_crs_still_refuses_of_the_misses() {
             percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
                 .to_string();
         let mut tx = crs.new_transaction();
-        tx.process_uri(&format!("/?q={query}"), "GET", "HTTP/1.1")
+        tx.process_uri(format!("/?q={query}"), "GET", "HTTP/1.1")
             .unwrap();
         for (name, header) in [
             ("Host", "example.com"),

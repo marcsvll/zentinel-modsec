@@ -40,7 +40,7 @@ const RULE: &str = "SecRuleEngine On\n\
 fn blocked(config: &str, query: &str) -> bool {
     let engine = ModSecurity::from_string(config).expect("the rules load");
     let mut tx = engine.new_transaction();
-    tx.process_uri(&format!("/?q={query}"), "GET", "HTTP/1.1")
+    tx.process_uri(format!("/?q={query}"), "GET", "HTTP/1.1")
         .unwrap();
     tx.process_request_headers().unwrap();
     tx.has_intervention()

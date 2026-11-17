@@ -25,7 +25,7 @@ pub struct ActionResult {
     /// Variables to set.
     pub setvar_ops: Vec<SetVarOp>,
     /// Captures from regex.
-    pub captures: Vec<String>,
+    pub captures: Vec<Vec<u8>>,
     /// Metadata collected.
     pub metadata: RuleMetadata,
     /// `ctl:` directives to apply to the transaction.
@@ -131,7 +131,7 @@ pub struct RuleMetadata {
 pub fn execute_actions(
     actions: &[Action],
     matched_value: Option<&str>,
-    captures: &[String],
+    captures: &[Vec<u8>],
 ) -> ActionResult {
     let mut result = ActionResult {
         captures: captures.to_vec(),

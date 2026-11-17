@@ -14,7 +14,7 @@ pub struct ResponseData {
     /// Response body.
     pub body: Vec<u8>,
     /// Content type.
-    pub content_type: String,
+    pub content_type: Vec<u8>,
 }
 
 impl ResponseData {
@@ -34,23 +34,18 @@ impl ResponseData {
     }
 
     /// Add a response header.
-    pub fn add_header(&mut self, name: &str, value: &str) {
-        self.headers.add(name.to_lowercase(), value.to_string());
+    pub fn add_header(&mut self, name: &[u8], value: &[u8]) {
+        self.headers.add(name.to_ascii_lowercase(), value);
 
         // Track content-type
-        if name.eq_ignore_ascii_case("content-type") {
-            self.content_type = value.to_string();
+        if name.eq_ignore_ascii_case(b"content-type") {
+            self.content_type = value.to_vec();
         }
     }
 
     /// Append to response body.
     pub fn append_body(&mut self, data: &[u8]) {
         self.body.extend_from_slice(data);
-    }
-
-    /// Get body as string.
-    pub fn body_str(&self) -> String {
-        String::from_utf8_lossy(&self.body).to_string()
     }
 
     /// Get body length.

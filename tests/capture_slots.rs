@@ -21,7 +21,7 @@ fn tx_var(tx: &Transaction, name: &str) -> String {
     use zentinel_modsec::variables::Collection;
     tx.tx()
         .get(name)
-        .and_then(|v| v.first().map(|s| s.to_string()))
+        .and_then(|v| v.first().map(|s| String::from_utf8_lossy(s).into_owned()))
         .unwrap_or_else(|| "-".to_string())
 }
 

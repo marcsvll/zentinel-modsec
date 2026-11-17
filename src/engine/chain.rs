@@ -10,7 +10,7 @@ pub struct ChainState {
     /// Whether the current chain has matched so far.
     pub chain_matched: bool,
     /// Accumulated captures from chain.
-    pub captures: Vec<String>,
+    pub captures: Vec<Vec<u8>>,
     /// Starting rule index of current chain.
     pub chain_start: Option<usize>,
 }
@@ -35,7 +35,7 @@ impl ChainState {
     }
 
     /// Continue chain with match result.
-    pub fn continue_chain(&mut self, matched: bool, captures: &[String]) {
+    pub fn continue_chain(&mut self, matched: bool, captures: &[Vec<u8>]) {
         if matched {
             self.captures.extend(captures.iter().cloned());
         } else {
@@ -129,7 +129,7 @@ mod tests {
         assert!(state.in_chain);
         assert!(state.chain_matched);
 
-        state.continue_chain(true, &["test".to_string()]);
+        state.continue_chain(true, &[b"test".to_vec()]);
         assert!(state.chain_matched);
         assert_eq!(state.captures.len(), 1);
 

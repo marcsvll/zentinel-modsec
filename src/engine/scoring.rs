@@ -160,20 +160,14 @@ impl AnomalyScore {
 
     /// Load scores from TX collection.
     pub fn sync_from_tx<C: crate::variables::Collection>(&mut self, tx: &C) {
-        if let Some(values) = tx.get(ANOMALY_SCORE) {
-            if let Some(v) = values.first() {
-                self.inbound = v.parse().unwrap_or(0);
-            }
+        if tx.get(ANOMALY_SCORE).is_some() {
+            self.inbound = crate::variables::first_number(tx.get(ANOMALY_SCORE)) as i32;
         }
-        if let Some(values) = tx.get(SQL_INJECTION_SCORE) {
-            if let Some(v) = values.first() {
-                self.sqli = v.parse().unwrap_or(0);
-            }
+        if tx.get(SQL_INJECTION_SCORE).is_some() {
+            self.sqli = crate::variables::first_number(tx.get(SQL_INJECTION_SCORE)) as i32;
         }
-        if let Some(values) = tx.get(XSS_SCORE) {
-            if let Some(v) = values.first() {
-                self.xss = v.parse().unwrap_or(0);
-            }
+        if tx.get(XSS_SCORE).is_some() {
+            self.xss = crate::variables::first_number(tx.get(XSS_SCORE)) as i32;
         }
     }
 }
@@ -212,10 +206,10 @@ mod tests {
 
         let anomaly_val = tx
             .get(ANOMALY_SCORE)
-            .and_then(|v| v.first().map(|s| s.to_string()));
+            .and_then(|v| v.first().map(|s| String::from_utf8_lossy(s).into_owned()));
         let sqli_val = tx
             .get(SQL_INJECTION_SCORE)
-            .and_then(|v| v.first().map(|s| s.to_string()));
+            .and_then(|v| v.first().map(|s| String::from_utf8_lossy(s).into_owned()));
         assert_eq!(anomaly_val, Some("15".to_string()));
         assert_eq!(sqli_val, Some("10".to_string()));
     }
