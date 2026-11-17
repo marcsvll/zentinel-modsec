@@ -538,6 +538,7 @@ impl Transaction {
         // What the rules of this phase resolve from the request is resolved
         // once and shared between them.
         let mut cache = PhaseCache::default();
+        cache.transformed.shortcuts = self.prefilter;
         // A chain is one logical rule: the starter's actions fire only when
         // every link matches, so they are held here until the chain completes.
         let mut pending_chain_actions: Option<ActionResult> = None;

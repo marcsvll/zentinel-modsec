@@ -6,7 +6,8 @@
 //! engine would skip and ModSecurity would catch: a bypass.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use zentinel_modsec::prefilter::{classes, contains_any, regex_literals, Need};
+use zentinel_modsec::operators::{Operator, RxOperator};
+use zentinel_modsec::prefilter::{classes, contains_any};
 
 fuzz_target!(|data: &[u8]| {
     let Some(split) = data.iter().position(|&b| b == 0) else {
@@ -19,32 +20,21 @@ fuzz_target!(|data: &[u8]| {
     if pattern.len() > 256 || value.len() > 4096 {
         return;
     }
-    let Ok(hir) = regex_syntax::ParserBuilder::new()
-        .unicode(false)
-        .utf8(false)
-        .nest_limit(32)
-        .build()
-        .parse(pattern)
-    else {
+    // As a rule's @rx: the same rewriting of `\x{HH}`, the same fallback to
+    // characters (where the operator claims nothing).
+    let Ok(op) = RxOperator::new(pattern) else {
         return;
     };
-    let Ok(regex) = regex::bytes::RegexBuilder::new(pattern)
-        .unicode(false)
-        .size_limit(1 << 20)
-        .build()
-    else {
-        return;
-    };
-    if !regex.is_match(value) {
+    if !op.execute(value).matched {
         return;
     }
-    if let Some(need) = Need::of_regex(&hir) {
+    if let Some(need) = op.need() {
         assert!(
             need.allows(classes(value)),
             "{pattern:?} matches {value:?}, which lacks a class the prefilter needs"
         );
     }
-    if let Some(literals) = regex_literals(&hir) {
+    if let Some(literals) = op.literals() {
         assert!(
             contains_any(value, &literals),
             "{pattern:?} matches {value:?}, which holds none of {literals:?}"

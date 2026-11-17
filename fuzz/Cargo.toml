@@ -9,8 +9,6 @@ description = "cargo-fuzz targets for the engine (not part of the crate)."
 cargo-fuzz = true
 
 [dependencies]
-regex = "1"
-regex-syntax = "0.8"
 libfuzzer-sys = "0.4"
 zentinel-modsec = { path = ".." }
 

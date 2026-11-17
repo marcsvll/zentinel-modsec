@@ -20,6 +20,8 @@ pub struct RuleProfile {
     /// Times the rule was evaluated.
     pub evaluations: u64,
     /// Values the rule's variables resolved to.
+    /// (Since 0.13.0, the values the prefilter let through to the operator:
+    /// values that cannot match are not counted.)
     pub values: u64,
     /// The whole evaluation: the stages below and what is between them.
     pub total_ns: u64,

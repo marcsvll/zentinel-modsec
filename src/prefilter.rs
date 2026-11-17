@@ -16,7 +16,8 @@
 //! whose requirement is not understood has no [`Need`] and always runs. The
 //! prefilter never decides a match, so it cannot add a false positive; a false
 //! negative would be a clause that a matching value does not satisfy, which is
-//! what `tests/prefilter_invisible.rs` and the `prefilter` fuzz target look for.
+//! what `the_prefilter_changes_nothing_on_the_corpus` (`tests/crs_conformance.rs`)
+//! and the `prefilter` fuzz target look for.
 
 use regex_syntax::hir::{Class, Hir, HirKind};
 

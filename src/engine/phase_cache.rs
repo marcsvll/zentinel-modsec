@@ -64,8 +64,14 @@ pub(crate) struct Transformed {
     /// Per slot and chain, the same for each value after the chain.
     hits: Vec<Vec<HitsOfChain>>,
     /// The sets of rules `raw_hits` and `hits` point into, each of the index's
-    /// number of words; the first is the empty set.
+    /// number of words; the first is the empty set. Each distinct set is kept
+    /// once (`set_at`): a request has few of them, however many values.
     sets: Vec<u64>,
+    /// Where each set of `sets` is.
+    set_at: std::collections::HashMap<Vec<u64>, u32>,
+    /// Whether the prefilter's shortcuts may be taken: off, every chain runs
+    /// in full, the reference the prefilter is tested against.
+    pub(crate) shortcuts: bool,
     /// Bytes of transformed text kept so far.
     kept_bytes: usize,
 }
@@ -92,7 +98,7 @@ impl Transformed {
         }
         // A value with none of the bytes the chain touches is its own result:
         // nothing to run, nothing to keep.
-        if let Some(touches) = pipeline.touches() {
+        if let Some(touches) = pipeline.touches().filter(|_| self.shortcuts) {
             if self.raw_classes(at, value) & touches == 0 {
                 return Cow::Borrowed(value);
             }
@@ -143,9 +149,10 @@ impl Transformed {
         value: &[u8],
     ) -> bool {
         pipeline.is_empty()
-            || pipeline
-                .touches()
-                .is_some_and(|t| self.raw_classes(at, value) & t == 0)
+            || (self.shortcuts
+                && pipeline
+                    .touches()
+                    .is_some_and(|t| self.raw_classes(at, value) & t == 0))
     }
 
     /// File a set of rules and say where; the empty set is always [`NO_RULE`].
@@ -153,12 +160,17 @@ impl Transformed {
         if set.iter().all(|w| *w == 0) {
             return NO_RULE;
         }
+        if let Some(&at) = self.set_at.get(set) {
+            return at;
+        }
         if self.sets.is_empty() {
             // The first place is the empty set's.
             self.sets.resize(set.len(), 0);
         }
         self.sets.extend_from_slice(set);
-        (self.sets.len() / set.len() - 1) as u32
+        let at = (self.sets.len() / set.len() - 1) as u32;
+        self.set_at.insert(set.to_vec(), at);
+        at
     }
 
     /// Which rules of the phase's literal index every value of a slot can
