@@ -4,6 +4,7 @@
 
 use super::traits::{Operator, OperatorResult};
 use crate::error::{Error, Result};
+use crate::prefilter::Need;
 use aho_corasick::AhoCorasick;
 use once_cell::sync::OnceCell;
 
@@ -61,12 +62,12 @@ fn as_bytes_pattern(pattern: &str) -> String {
     out
 }
 
-fn syntax_error(mode: Mode, pattern: &str) -> Option<String> {
+fn parse(mode: Mode, pattern: &str) -> std::result::Result<regex_syntax::hir::Hir, String> {
     let mut parser = regex_syntax::ParserBuilder::new();
     if mode == Mode::Bytes {
         parser.unicode(false).utf8(false);
     }
-    parser.build().parse(pattern).err().map(|e| e.to_string())
+    parser.build().parse(pattern).map_err(|e| e.to_string())
 }
 
 /// Regex operator (@rx) with lazy compilation.
@@ -81,6 +82,8 @@ fn syntax_error(mode: Mode, pattern: &str) -> Option<String> {
 pub struct RxOperator {
     pattern_str: String,
     mode: Mode,
+    /// What a value must hold for the pattern to match it (byte mode only).
+    need: Option<Need>,
     /// `None` once compilation has been attempted and failed, so a pattern
     /// that passes syntax validation but cannot be built (an oversized
     /// program, say) is reported once rather than retried per request.
@@ -104,20 +107,23 @@ impl RxOperator {
         }
 
         let as_bytes = as_bytes_pattern(pattern);
-        let (mode, pattern) = if syntax_error(Mode::Bytes, &as_bytes).is_none() {
-            (Mode::Bytes, as_bytes.as_str())
-        } else if let Some(error) = syntax_error(Mode::Characters, pattern) {
-            return Err(Error::RegexCompile {
-                pattern: pattern.to_string(),
-                source: regex::Error::Syntax(error),
-            });
-        } else {
-            (Mode::Characters, pattern)
+        let (mode, pattern, need) = match parse(Mode::Bytes, &as_bytes) {
+            Ok(hir) => (Mode::Bytes, as_bytes.as_str(), Need::of_regex(&hir)),
+            Err(_) => match parse(Mode::Characters, pattern) {
+                Ok(_) => (Mode::Characters, pattern, None),
+                Err(error) => {
+                    return Err(Error::RegexCompile {
+                        pattern: pattern.to_string(),
+                        source: regex::Error::Syntax(error),
+                    })
+                }
+            },
         };
 
         Ok(Self {
             pattern_str: pattern.to_string(),
             mode,
+            need,
             compiled: OnceCell::new(),
         })
     }
@@ -182,6 +188,10 @@ impl Operator for RxOperator {
 
     fn name(&self) -> &'static str {
         "rx"
+    }
+
+    fn need(&self) -> Option<Need> {
+        self.need
     }
 
     fn supports_capture(&self) -> bool {
@@ -290,6 +300,10 @@ impl Operator for PmOperator {
 
     fn name(&self) -> &'static str {
         "pm"
+    }
+
+    fn need(&self) -> Option<Need> {
+        Need::of_any_literal(self.patterns.iter().map(String::as_bytes), true)
     }
 }
 

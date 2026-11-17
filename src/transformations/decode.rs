@@ -11,6 +11,7 @@
 //! anything above `10FFFF`) gets ModSecurity's low byte.
 
 use super::{is_c_space, is_hex, x2c, Transformation, UnicodeMap};
+use crate::prefilter::classes_of;
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -93,6 +94,10 @@ impl Transformation for UrlDecode {
     fn name(&self) -> &'static str {
         "urlDecode"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"%+"))
+    }
 }
 
 /// URL decode with Unicode support, `%uXXXX` read through the built-in
@@ -112,6 +117,10 @@ impl Transformation for UrlDecodeUniWith {
 
     fn name(&self) -> &'static str {
         "urlDecodeUni"
+    }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"%+"))
     }
 }
 
@@ -177,6 +186,10 @@ impl Transformation for UrlDecodeUni {
     fn name(&self) -> &'static str {
         "urlDecodeUni"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"%+"))
+    }
 }
 
 /// Base64 decode transformation.
@@ -189,7 +202,10 @@ impl Transformation for Base64Decode {
     fn transform<'a>(&self, input: &'a [u8]) -> Cow<'a, [u8]> {
         use base64::Engine;
         let text = input.split(|&b| b == 0).next().unwrap_or_default();
-        if text.is_empty() {
+        // Most values are not base64 and are told apart without decoding:
+        // canonical base64 comes in groups of four characters of its alphabet.
+        let alphabet = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=');
+        if text.is_empty() || text.len() % 4 != 0 || !text.iter().all(alphabet) {
             return Cow::Borrowed(input);
         }
         match base64::engine::general_purpose::STANDARD.decode(text) {
@@ -451,6 +467,10 @@ impl Transformation for HtmlEntityDecode {
     fn name(&self) -> &'static str {
         "htmlEntityDecode"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"&"))
+    }
 }
 
 /// JavaScript decode transformation.
@@ -531,6 +551,10 @@ impl Transformation for JsDecode {
     fn name(&self) -> &'static str {
         "jsDecode"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"\\"))
+    }
 }
 
 /// CSS decode transformation.
@@ -593,6 +617,10 @@ impl Transformation for CssDecode {
 
     fn name(&self) -> &'static str {
         "cssDecode"
+    }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"\\"))
     }
 }
 

@@ -7,6 +7,7 @@ use crate::parser::{
     RuleEngineMode as ParserRuleEngineMode, RuleIdSelector, Selection, UpdateTargetById,
     VariableName, VariableSpec, XmlTarget,
 };
+use crate::prefilter::Need;
 use crate::transformations::{TransformationPipeline, UnicodeMap};
 
 use super::phase::Phase;
@@ -38,6 +39,10 @@ pub struct CompiledRule {
     pub is_chain: bool,
     /// Index of next rule in chain (if any).
     pub chain_next: Option<usize>,
+    /// What a value must hold for the operator to match it, when the rule can
+    /// be prefiltered (see [`crate::prefilter`]): a plain operator, not
+    /// negated, without a macro or a count.
+    pub need: Option<Need>,
 }
 
 impl std::fmt::Debug for CompiledRule {
@@ -256,9 +261,17 @@ impl CompiledRuleset {
                             _ => None,
                         })
                         .collect();
+                    // A negated operator matches what the pattern does not; a
+                    // macro makes the operand per request; a count is not a
+                    // value of the request.
+                    let prefilterable = !operator_negated
+                        && !operator_spec.argument.contains("%{")
+                        && !rule.variables.iter().any(|v| v.count_mode);
+                    let need = prefilterable.then(|| operator.need()).flatten();
                     let compiled = CompiledRule {
                         id,
                         phase,
+                        need,
                         variables: rule.variables,
                         operator,
                         operator_negated,
@@ -319,6 +332,7 @@ impl CompiledRuleset {
                         tags: Vec::new(),
                         is_chain: false,
                         chain_next: None,
+                        need: None,
                     };
 
                     ruleset.rules.add(phase, compiled);

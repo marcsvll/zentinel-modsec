@@ -27,6 +27,15 @@ pub trait Transformation: Send + Sync {
 
     /// Get the transformation name.
     fn name(&self) -> &'static str;
+
+    /// Classes of bytes ([`crate::prefilter::classes`]) without which the
+    /// transformation has nothing to do: for a value that holds none of them,
+    /// `transform` returns the value itself. `None` (the default) when no such
+    /// set is known. Lets a value be recognized as unchanged by a whole chain
+    /// from one summary of its bytes, without running the chain.
+    fn touches(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Whether `b` is a hexadecimal digit.
@@ -135,6 +144,10 @@ impl Transformation for None_ {
         Cow::Borrowed(input)
     }
 
+    fn touches(&self) -> Option<u64> {
+        Some(0)
+    }
+
     fn name(&self) -> &'static str {
         "none"
     }
@@ -217,6 +230,79 @@ mod tests {
         assert_eq!(x2c(b'F', b'f'), 0xff);
         // `0z` in libmodsecurity's hexDecode vector gives `#`.
         assert_eq!(x2c(b'0', b'z'), b'#');
+    }
+
+    /// What a transformation says it touches is checked on every short value:
+    /// one that holds none of those classes of bytes comes back as it was.
+    #[test]
+    fn a_value_without_what_a_transformation_touches_is_unchanged() {
+        let names = [
+            "urlDecode",
+            "urlDecodeUni",
+            "htmlEntityDecode",
+            "jsDecode",
+            "cssDecode",
+            "lowercase",
+            "uppercase",
+            "compressWhitespace",
+            "removeWhitespace",
+            "removeNulls",
+            "replaceNulls",
+            "trim",
+            "trimLeft",
+            "trimRight",
+            "normalizePath",
+            "normalizePathWin",
+            "removeComments",
+            "replaceComments",
+            "removeCommentsChar",
+            "cmdLine",
+            "utf8toUnicode",
+            "escapeSeqDecode",
+            "sqlHexDecode",
+            "none",
+        ];
+        let mut inputs = short_inputs();
+        // Bytes the alphabet of `short_inputs` lacks.
+        for extra in [
+            &b"0x41"[..],
+            b"<!",
+            b"a\0b",
+            b"a\x0cb",
+            b"-->",
+            b"*/",
+            b"\r\n",
+            b"a=b",
+            b"0X4a",
+        ] {
+            inputs.push(extra.to_vec());
+        }
+        for name in names {
+            let t = create_transformation(name).unwrap();
+            let touches = t
+                .touches()
+                .unwrap_or_else(|| panic!("{name} says what it touches"));
+            let mut spared = 0;
+            for input in &inputs {
+                if crate::prefilter::classes(input) & touches == 0 {
+                    spared += 1;
+                    assert_eq!(
+                        t.transform(input).as_ref(),
+                        input.as_slice(),
+                        "{name} on {input:?}"
+                    );
+                }
+            }
+            assert!(spared > 0, "{name}");
+        }
+        // The ones that can always change a value say nothing.
+        for name in ["base64Decode", "hexDecode", "md5", "length", "urlEncode"] {
+            assert_eq!(
+                create_transformation(name).unwrap().touches(),
+                None,
+                "{name}"
+            );
+        }
     }
 
     #[test]

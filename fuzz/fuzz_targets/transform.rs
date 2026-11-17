@@ -1,6 +1,7 @@
 //! Every transformation over arbitrary bytes, alone and in chains of up to four picked by
 //! the input's first bytes, as rules chain them. Nothing may panic, and a transformation
-//! that reports nothing to do (borrows its input) must give the input back unchanged.
+//! that reports nothing to do (borrows its input) must give the input back unchanged;
+//! so must one given a value without the bytes it says it touches (`touches`).
 #![no_main]
 use std::borrow::Cow;
 
@@ -57,6 +58,13 @@ fuzz_target!(|data: &[u8]| {
     // Each transformation alone.
     for name in NAMES {
         let t = create_transformation(name).expect("every listed name is known");
+        // What a transformation says it touches: a value with none of those
+        // classes of bytes comes back as it was.
+        if let Some(touches) = t.touches() {
+            if zentinel_modsec::prefilter::classes(value) & touches == 0 {
+                assert_eq!(t.transform(value).as_ref(), value, "{name}");
+            }
+        }
         if let Cow::Borrowed(out) = t.transform(value) {
             // A borrowed answer is the input or a part of it (trim).
             assert!(value.windows(out.len().max(1)).any(|w| w == out) || out.is_empty());

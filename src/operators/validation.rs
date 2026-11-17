@@ -17,6 +17,11 @@ impl Operator for ValidateUrlEncodingOperator {
     fn name(&self) -> &'static str {
         "validateUrlEncoding"
     }
+
+    /// Only a `%` can be badly encoded.
+    fn need(&self) -> Option<crate::prefilter::Need> {
+        crate::prefilter::Need::of_any_byte(*b"%")
+    }
 }
 
 /// UTF-8 encoding validation operator (@validateUtf8Encoding).
@@ -36,6 +41,11 @@ impl Operator for ValidateUtf8EncodingOperator {
 
     fn name(&self) -> &'static str {
         "validateUtf8Encoding"
+    }
+
+    /// ASCII is valid UTF-8: only a value with a byte above `7F` can match.
+    fn need(&self) -> Option<crate::prefilter::Need> {
+        crate::prefilter::Need::of_any_byte(0x80..=0xff)
     }
 }
 

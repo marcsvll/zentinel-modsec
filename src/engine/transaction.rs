@@ -80,6 +80,8 @@ pub struct Transaction {
     matched_data: Vec<MatchedData>,
     /// Where the time went, when the caller asked (`enable_profile`).
     profile: Option<Box<Profile>>,
+    /// Whether values that cannot match a rule skip its operator.
+    prefilter: bool,
 }
 
 /// The variable a rule matched on.
@@ -187,7 +189,13 @@ impl Transaction {
             controls: TransactionControls::default(),
             matched_data: Vec::new(),
             profile: None,
+            prefilter: true,
         }
+    }
+
+    /// See [`ModSecurity::set_prefilter`](crate::ModSecurity::set_prefilter).
+    pub fn set_prefilter(&mut self, on: bool) {
+        self.prefilter = on;
     }
 
     /// Record, from here on, where this transaction spends its time: per phase
@@ -932,7 +940,30 @@ impl Transaction {
             };
             match resolved {
                 Cow::Borrowed(values) => {
+                    // A value that cannot match this rule's operator is left
+                    // out here, before anything else is done with it. Only a
+                    // rule whose operator runs on the values themselves has a
+                    // `need` (no count, no negation), so nothing else of the
+                    // rule depends on the values left out.
+                    let classes = match (rule.need.filter(|_| self.prefilter), slot) {
+                        (Some(need), Some(slot)) => {
+                            let every_step = has_multi_match(rule);
+                            let classes = transformed.classes(
+                                slot,
+                                &rule.transformations,
+                                every_step,
+                                values,
+                            );
+                            Some((need, classes))
+                        }
+                        _ => None,
+                    };
                     for (item, (name, value)) in values.iter().enumerate() {
+                        if let Some((need, classes)) = &classes {
+                            if !need.allows(classes[item]) {
+                                continue;
+                            }
+                        }
                         if keep(name) {
                             all_values.push((
                                 Cow::Borrowed(name),

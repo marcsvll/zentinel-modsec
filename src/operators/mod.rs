@@ -187,6 +187,20 @@ impl Operator for ValidateByteRangeOperator {
     fn name(&self) -> &'static str {
         "validateByteRange"
     }
+
+    /// A match is a byte outside the ranges: the value must hold one. With no
+    /// range at all every byte is one, and nothing is claimed.
+    fn need(&self) -> Option<crate::prefilter::Need> {
+        if self.ranges.is_empty() {
+            return None;
+        }
+        let allowed = |b: u8| {
+            self.ranges
+                .iter()
+                .any(|(start, end)| b >= *start && b <= *end)
+        };
+        crate::prefilter::Need::of_any_byte((0..=255u8).filter(|b| !allowed(*b)))
+    }
 }
 
 /// Within operator - checks if value is within a list of values.

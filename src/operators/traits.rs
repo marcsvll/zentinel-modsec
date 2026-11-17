@@ -52,6 +52,13 @@ pub trait Operator: Send + Sync {
     /// Get the operator name.
     fn name(&self) -> &'static str;
 
+    /// What a value must hold for this operator to match it, when that is
+    /// known (see [`crate::prefilter`]). A value that does not satisfy it is
+    /// not run through `execute`; `None` (the default) runs every value.
+    fn need(&self) -> Option<crate::prefilter::Need> {
+        None
+    }
+
     /// Whether this operator supports capture groups.
     fn supports_capture(&self) -> bool {
         false

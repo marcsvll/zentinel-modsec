@@ -49,8 +49,9 @@ fn the_profile_names_every_rule_of_each_phase_that_ran() {
 
     let phase2 = &profile.phases[1];
     assert_eq!(phase2.rules.len(), 1);
-    // ARGS resolved to the two arguments.
-    assert_eq!(phase2.rules[0].values, 2);
+    // ARGS resolved to the two arguments; `1` has no letter, cannot match
+    // `select` and is not run through the operator (the prefilter).
+    assert_eq!(phase2.rules[0].values, 1);
     assert!(phase2.rules[0].total_ns >= phase2.rules[0].transform_ns + phase2.rules[0].operator_ns);
 
     // Phases that did not run are empty.

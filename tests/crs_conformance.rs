@@ -176,12 +176,17 @@ fn load(dir: &Path, extra: &str) -> ModSecurity {
 
 /// Drive one corpus stage and return the rule IDs that matched.
 fn run_stage(m: &ModSecurity, input: &Input) -> Vec<String> {
+    drive(m, input).matched_rules().to_vec()
+}
+
+/// Drive one corpus stage through request headers and body.
+fn drive(m: &ModSecurity, input: &Input) -> zentinel_modsec::Transaction {
     let mut tx = m.new_transaction();
     let uri = input.uri.clone().unwrap_or_else(|| "/".into());
     let method = input.method.clone().unwrap_or_else(|| "GET".into());
     let version = input.version.clone().unwrap_or_else(|| "HTTP/1.1".into());
     if tx.process_uri(&uri, &method, &version).is_err() {
-        return vec![];
+        return tx;
     }
 
     let has = |n: &str| input.headers.keys().any(|k| k.eq_ignore_ascii_case(n));
@@ -209,13 +214,76 @@ fn run_stage(m: &ModSecurity, input: &Input) -> Vec<String> {
         }
     }
     if tx.process_request_headers().is_err() {
-        return tx.matched_rules().to_vec();
+        return tx;
     }
     if !body.is_empty() {
         let _ = tx.append_request_body(body.as_bytes());
     }
     let _ = tx.process_request_body();
-    tx.matched_rules().to_vec()
+    tx
+}
+
+/// The prefilter (`zentinel_modsec::prefilter`) skips operators on values that
+/// cannot match; it must not change what matches. Every request of the corpus,
+/// attacks and negative tests alike, goes through two engines with the same
+/// rules, one with the prefilter and one without: the rules that matched, what
+/// each matched on (variable, value, portion) and the decision must be the same.
+#[test]
+fn the_prefilter_changes_nothing_on_the_corpus() {
+    let Some(dir) = crs_dir() else { return };
+    let with = load(&dir, FTW_SETUP);
+    let mut without = load(&dir, FTW_SETUP);
+    without.set_prefilter(false);
+    // In blocking mode a deny ends the request: the same rule must end it.
+    let blocking = "SecAction \"id:900990,phase:1,pass,nolog,setvar:tx.blocking_paranoia_level=2\"";
+    let block_with = load(&dir, blocking);
+    let mut block_without = load(&dir, blocking);
+    block_without.set_prefilter(false);
+
+    let root = dir.join("tests/regression/tests");
+    let (mut requests, mut matches) = (0u32, 0usize);
+    let mut differences = Vec::new();
+    for entry in walkdir::WalkDir::new(&root).into_iter().flatten() {
+        if entry.path().extension().is_none_or(|e| e != "yaml") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(parsed) = serde_yaml::from_str::<TestFile>(&text) else {
+            continue;
+        };
+        for (t, test) in parsed.tests.iter().enumerate() {
+            for stage in &test.stages {
+                for (a, b) in [(&with, &without), (&block_with, &block_without)] {
+                    let (on, off) = (drive(a, &stage.input), drive(b, &stage.input));
+                    requests += 1;
+                    matches += off.matched_rules().len();
+                    if on.matched_rules() != off.matched_rules()
+                        || on.matched_data() != off.matched_data()
+                        || on.intervention().map(|i| &i.rule_ids)
+                            != off.intervention().map(|i| &i.rule_ids)
+                    {
+                        differences.push(format!(
+                            "{} test {}: with {:?}, without {:?}",
+                            entry.path().display(),
+                            t + 1,
+                            on.matched_rules(),
+                            off.matched_rules()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("prefilter: {requests} requests, {matches} rule matches compared");
+    assert!(requests > 9000, "corpus too small: {requests}");
+    assert!(
+        differences.is_empty(),
+        "{} request(s) differ with the prefilter:\n{}",
+        differences.len(),
+        differences.join("\n")
+    );
 }
 
 // --- the gate --------------------------------------------------------------

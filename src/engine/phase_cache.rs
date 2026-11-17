@@ -52,6 +52,11 @@ type Chains = Vec<(u32, Option<Box<[u8]>>)>;
 pub(crate) struct Transformed {
     /// Per slot, per value: the chains applied so far.
     by_slot: Vec<Vec<Chains>>,
+    /// Per slot and value, the classes of bytes of the value as resolved
+    /// ([`UNKNOWN`] until first asked for).
+    raw_classes: Vec<Vec<u64>>,
+    /// Per slot and chain, the classes of bytes of each value after the chain.
+    classes: Vec<Vec<((u32, bool), Vec<u64>)>>,
     /// Bytes of transformed text kept so far.
     kept_bytes: usize,
 }
@@ -75,6 +80,13 @@ impl Transformed {
     ) -> Cow<'a, [u8]> {
         if pipeline.is_empty() {
             return Cow::Borrowed(value);
+        }
+        // A value with none of the bytes the chain touches is its own result:
+        // nothing to run, nothing to keep.
+        if let Some(touches) = pipeline.touches() {
+            if self.raw_classes(at, value) & touches == 0 {
+                return Cow::Borrowed(value);
+            }
         }
         let (slot, item) = at;
         if self.by_slot.len() <= slot {
@@ -110,6 +122,75 @@ impl Transformed {
         Cow::Borrowed(chains[found].1.as_deref().unwrap_or(value))
     }
 }
+
+impl Transformed {
+    /// The classes of bytes of a value as resolved, summarized on first use.
+    fn raw_classes(&mut self, (slot, item): ValueAt, value: &[u8]) -> u64 {
+        if self.raw_classes.len() <= slot {
+            self.raw_classes.resize_with(slot + 1, Vec::new);
+        }
+        let of_slot = &mut self.raw_classes[slot];
+        if of_slot.len() <= item {
+            of_slot.resize(item + 1, UNKNOWN);
+        }
+        if of_slot[item] == UNKNOWN {
+            of_slot[item] = crate::prefilter::classes(value);
+        }
+        of_slot[item]
+    }
+
+    /// The classes of bytes ([`crate::prefilter::classes`]) of every value of
+    /// a slot after `pipeline`, in the slot's order: what a rule's
+    /// [`Need`](crate::prefilter::Need) is tested against before its operator
+    /// runs. Computed once per slot and chain; a value the chain leaves as it
+    /// is has the classes of the value as resolved.
+    ///
+    /// With `every_step` (`multiMatch`) the operator also runs on the value
+    /// before the chain and after each step, so only a value the chain is
+    /// known not to touch has one form to summarize; any other is given every
+    /// class, which no need rules out.
+    pub(crate) fn classes(
+        &mut self,
+        slot: usize,
+        pipeline: &TransformationPipeline,
+        every_step: bool,
+        values: &[(Vec<u8>, Vec<u8>)],
+    ) -> &[u64] {
+        if self.classes.len() <= slot {
+            self.classes.resize_with(slot + 1, Vec::new);
+        }
+        let key = (pipeline.chain_key(), every_step);
+        let found = match self.classes[slot].iter().position(|(k, _)| *k == key) {
+            Some(found) => found,
+            None => {
+                let mut masks = Vec::with_capacity(values.len());
+                for (item, (_, value)) in values.iter().enumerate() {
+                    let raw = self.raw_classes((slot, item), value);
+                    if every_step {
+                        let untouched = pipeline.touches().is_some_and(|t| raw & t == 0);
+                        masks.push(if untouched { raw } else { u64::MAX });
+                        continue;
+                    }
+                    let changed = match self.apply((slot, item), pipeline, value) {
+                        Cow::Borrowed(same)
+                            if same.len() == value.len() && same.as_ptr() == value.as_ptr() =>
+                        {
+                            None
+                        }
+                        other => Some(crate::prefilter::classes(&other)),
+                    };
+                    masks.push(changed.unwrap_or(raw));
+                }
+                self.classes[slot].push((key, masks));
+                self.classes[slot].len() - 1
+            }
+        };
+        &self.classes[slot][found].1
+    }
+}
+
+/// A summary not computed yet: no value has every bit set.
+const UNKNOWN: u64 = u64::MAX;
 
 impl Resolved {
     /// Resolve this spec's values if no rule of the phase has asked for them

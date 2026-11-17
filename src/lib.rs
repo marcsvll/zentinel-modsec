@@ -50,6 +50,7 @@ pub mod engine;
 pub mod error;
 pub mod operators;
 pub mod parser;
+pub mod prefilter;
 pub mod transformations;
 pub mod variables;
 

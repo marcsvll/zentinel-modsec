@@ -5,6 +5,7 @@
 //! whitespace is whitespace.
 
 use super::{is_c_space, is_hex, x2c, Transformation};
+use crate::prefilter::{classes_of, DIGITS, LOWER_CASE, NOT_ASCII, UPPER_CASE, WHITESPACE};
 use std::borrow::Cow;
 
 /// Lowercase transformation (ASCII letters only, as ModSecurity's `tolower`).
@@ -33,6 +34,10 @@ impl Transformation for Lowercase {
     fn name(&self) -> &'static str {
         "lowercase"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(UPPER_CASE)
+    }
 }
 
 /// Uppercase transformation (ASCII letters only).
@@ -48,6 +53,10 @@ impl Transformation for Uppercase {
 
     fn name(&self) -> &'static str {
         "uppercase"
+    }
+
+    fn touches(&self) -> Option<u64> {
+        Some(LOWER_CASE)
     }
 }
 
@@ -139,6 +148,10 @@ impl Transformation for CompressWhitespace {
     fn name(&self) -> &'static str {
         "compressWhitespace"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(WHITESPACE)
+    }
 }
 
 /// Remove whitespace transformation.
@@ -190,6 +203,10 @@ impl Transformation for RemoveWhitespace {
     fn name(&self) -> &'static str {
         "removeWhitespace"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(WHITESPACE)
+    }
 }
 
 /// Remove null bytes transformation.
@@ -205,6 +222,10 @@ impl Transformation for RemoveNulls {
 
     fn name(&self) -> &'static str {
         "removeNulls"
+    }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"\0"))
     }
 }
 
@@ -226,6 +247,10 @@ impl Transformation for ReplaceNulls {
 
     fn name(&self) -> &'static str {
         "replaceNulls"
+    }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"\0"))
     }
 }
 
@@ -256,6 +281,10 @@ impl Transformation for Trim {
     fn name(&self) -> &'static str {
         "trim"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(WHITESPACE)
+    }
 }
 
 /// Trim left transformation.
@@ -269,6 +298,10 @@ impl Transformation for TrimLeft {
     fn name(&self) -> &'static str {
         "trimLeft"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(WHITESPACE)
+    }
 }
 
 /// Trim right transformation.
@@ -281,6 +314,10 @@ impl Transformation for TrimRight {
 
     fn name(&self) -> &'static str {
         "trimRight"
+    }
+
+    fn touches(&self) -> Option<u64> {
+        Some(WHITESPACE)
     }
 }
 
@@ -428,6 +465,10 @@ impl Transformation for NormalizePath {
     fn name(&self) -> &'static str {
         "normalizePath"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"/\\."))
+    }
 }
 
 /// Normalize path transformation (Windows-style).
@@ -446,6 +487,10 @@ impl Transformation for NormalizePathWin {
 
     fn name(&self) -> &'static str {
         "normalizePathWin"
+    }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"/\\."))
     }
 }
 
@@ -510,6 +555,10 @@ impl Transformation for RemoveComments {
     fn name(&self) -> &'static str {
         "removeComments"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"*-#"))
+    }
 }
 
 /// Replace comments transformation (replaces /* ... */ with space).
@@ -564,6 +613,10 @@ impl Transformation for ReplaceComments {
     fn name(&self) -> &'static str {
         "replaceComments"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"*"))
+    }
 }
 
 /// Remove comment characters transformation.
@@ -617,6 +670,10 @@ impl Transformation for RemoveCommentsChar {
     fn name(&self) -> &'static str {
         "removeCommentsChar"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"*-#"))
+    }
 }
 
 /// SQL hex decode transformation.
@@ -659,6 +716,10 @@ impl Transformation for SqlHexDecode {
     fn name(&self) -> &'static str {
         "sqlHexDecode"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(DIGITS)
+    }
 }
 
 /// UTF-8 to Unicode transformation.
@@ -692,6 +753,10 @@ impl Transformation for Utf8ToUnicode {
 
     fn name(&self) -> &'static str {
         "utf8ToUnicode"
+    }
+
+    fn touches(&self) -> Option<u64> {
+        Some(NOT_ASCII)
     }
 }
 
@@ -781,6 +846,10 @@ impl Transformation for CmdLine {
     fn name(&self) -> &'static str {
         "cmdLine"
     }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"\\\"'^,; \t\r\n") | UPPER_CASE)
+    }
 }
 
 /// Escape sequence decode transformation.
@@ -864,6 +933,10 @@ impl Transformation for EscapeSeqDecode {
 
     fn name(&self) -> &'static str {
         "escapeSeqDecode"
+    }
+
+    fn touches(&self) -> Option<u64> {
+        Some(classes_of(b"\\"))
     }
 }
 

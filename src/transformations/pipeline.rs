@@ -27,6 +27,15 @@ pub struct TransformationPipeline {
     transformations: Vec<Arc<dyn Transformation>>,
     /// See [`chain_key`].
     key: u32,
+    /// See [`TransformationPipeline::touches`].
+    touches: Option<u64>,
+}
+
+/// The union of what each transformation touches, when all of them say.
+fn chain_touches(transformations: &[Arc<dyn Transformation>]) -> Option<u64> {
+    transformations
+        .iter()
+        .try_fold(0, |all, t| Some(all | t.touches()?))
 }
 
 impl TransformationPipeline {
@@ -35,6 +44,7 @@ impl TransformationPipeline {
         Self {
             transformations: Vec::new(),
             key: chain_key(&[]),
+            touches: Some(0),
         }
     }
 
@@ -63,9 +73,11 @@ impl TransformationPipeline {
         }
 
         let key = chain_key(&transformations);
+        let touches = chain_touches(&transformations);
         Ok(Self {
             transformations,
             key,
+            touches,
         })
     }
 
@@ -73,6 +85,15 @@ impl TransformationPipeline {
     pub fn add(&mut self, transformation: Arc<dyn Transformation>) {
         self.transformations.push(transformation);
         self.key = chain_key(&self.transformations);
+        self.touches = chain_touches(&self.transformations);
+    }
+
+    /// Classes of bytes without which the whole chain leaves a value as it
+    /// is: a value holding none of them is unchanged by the first
+    /// transformation, so the second sees the same value, and so on. `None`
+    /// when a transformation of the chain does not say what it touches.
+    pub fn touches(&self) -> Option<u64> {
+        self.touches
     }
 
     /// A number shared by every pipeline with the same transformations in the

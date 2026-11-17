@@ -36,6 +36,10 @@ impl Operator for ContainsOperator {
     fn name(&self) -> &'static str {
         "contains"
     }
+
+    fn need(&self) -> Option<crate::prefilter::Need> {
+        crate::prefilter::Need::of_literal(&self.needle, false)
+    }
 }
 
 /// Begins with operator (@beginsWith).
@@ -63,6 +67,10 @@ impl Operator for BeginsWithOperator {
 
     fn name(&self) -> &'static str {
         "beginsWith"
+    }
+
+    fn need(&self) -> Option<crate::prefilter::Need> {
+        crate::prefilter::Need::of_literal(&self.prefix, false)
     }
 }
 
@@ -92,6 +100,10 @@ impl Operator for EndsWithOperator {
     fn name(&self) -> &'static str {
         "endsWith"
     }
+
+    fn need(&self) -> Option<crate::prefilter::Need> {
+        crate::prefilter::Need::of_literal(&self.suffix, false)
+    }
 }
 
 /// String equality operator (@streq).
@@ -119,6 +131,10 @@ impl Operator for StreqOperator {
 
     fn name(&self) -> &'static str {
         "streq"
+    }
+
+    fn need(&self) -> Option<crate::prefilter::Need> {
+        crate::prefilter::Need::of_literal(&self.expected, false)
     }
 }
 

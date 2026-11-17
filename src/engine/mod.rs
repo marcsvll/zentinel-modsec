@@ -25,6 +25,8 @@ pub struct ModSecurity {
     ruleset: Arc<CompiledRuleset>,
     /// Default block status code.
     default_status: u16,
+    /// Whether values that cannot match a rule skip its operator.
+    prefilter: bool,
 }
 
 impl ModSecurity {
@@ -33,6 +35,7 @@ impl ModSecurity {
         Self {
             ruleset: Arc::new(ruleset),
             default_status: 403,
+            prefilter: true,
         }
     }
 
@@ -53,9 +56,21 @@ impl ModSecurity {
         self.default_status = status;
     }
 
+    /// Turn the prefilter off (or back on; it is on by default).
+    ///
+    /// The prefilter skips an operator on a value that cannot match it (see
+    /// [`crate::prefilter`]); it changes how much work a request costs, never
+    /// what matches. Off, every operator runs on every value: the reference
+    /// the prefilter is tested against, and the way out if it is ever wrong.
+    pub fn set_prefilter(&mut self, on: bool) {
+        self.prefilter = on;
+    }
+
     /// Create a new transaction for processing a request.
     pub fn new_transaction(&self) -> Transaction {
-        Transaction::new(Arc::clone(&self.ruleset), self.default_status)
+        let mut tx = Transaction::new(Arc::clone(&self.ruleset), self.default_status);
+        tx.set_prefilter(self.prefilter);
+        tx
     }
 
     /// Get the ruleset.
