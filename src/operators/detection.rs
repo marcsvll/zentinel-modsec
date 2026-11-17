@@ -16,24 +16,24 @@ use super::traits::{Operator, OperatorResult};
 /// identifiers, numbers), and answering here costs one pass over the bytes
 /// instead of a tokenizer run. `differential/` checks the claim against the C
 /// library.
-fn is_one_plain_token(value: &str) -> bool {
+fn is_one_plain_token(value: &[u8]) -> bool {
     value
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// SQL injection detection operator (@detectSQLi).
 pub struct DetectSqliOperator;
 
 impl Operator for DetectSqliOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
         if is_one_plain_token(value) {
             return OperatorResult::no_match();
         }
-        let result = libinjectionrs::detect_sqli(value.as_bytes());
+        let result = libinjectionrs::detect_sqli(value);
         if result.is_injection() {
             // What matched is libinjection's fingerprint, as in ModSecurity.
-            let fingerprint = result.fingerprint.map(|f| f.as_str().to_string());
+            let fingerprint = result.fingerprint.map(|f| f.as_str().as_bytes().to_vec());
             OperatorResult::matched(fingerprint.unwrap_or_default())
         } else {
             OperatorResult::no_match()
@@ -49,10 +49,10 @@ impl Operator for DetectSqliOperator {
 pub struct DetectXssOperator;
 
 impl Operator for DetectXssOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        if libinjectionrs::detect_xss(value.as_bytes()).is_injection() {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
+        if libinjectionrs::detect_xss(value).is_injection() {
             // libinjection has no XSS fingerprint; what matched is the input.
-            OperatorResult::matched(value.to_string())
+            OperatorResult::matched(value)
         } else {
             OperatorResult::no_match()
         }

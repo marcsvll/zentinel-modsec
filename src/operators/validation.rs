@@ -6,7 +6,7 @@ use super::traits::{Operator, OperatorResult};
 pub struct ValidateUrlEncodingOperator;
 
 impl Operator for ValidateUrlEncodingOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
         if is_valid_url_encoding(value) {
             OperatorResult::no_match() // Valid encoding = no match (not an attack)
         } else {
@@ -23,10 +23,11 @@ impl Operator for ValidateUrlEncodingOperator {
 pub struct ValidateUtf8EncodingOperator;
 
 impl Operator for ValidateUtf8EncodingOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        // In Rust, &str is always valid UTF-8, so we check for overlong encodings
-        // and other invalid sequences that might have been decoded
-        if is_valid_utf8_sequence(value) {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
+        // ModSecurity's check is UTF-8 itself (RFC 3629): no stray
+        // continuation byte, no truncated sequence, no overlong form, no
+        // surrogate, nothing above U+10FFFF. A NUL is a character.
+        if std::str::from_utf8(value).is_ok() {
             OperatorResult::no_match()
         } else {
             OperatorResult::matched("invalid UTF-8 encoding".to_string())
@@ -39,53 +40,19 @@ impl Operator for ValidateUtf8EncodingOperator {
 }
 
 /// Check if a string has valid URL encoding.
-fn is_valid_url_encoding(s: &str) -> bool {
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            // Must be followed by exactly 2 hex digits
-            let hex1 = chars.next();
-            let hex2 = chars.next();
-
-            match (hex1, hex2) {
-                (Some(h1), Some(h2)) => {
-                    if !h1.is_ascii_hexdigit() || !h2.is_ascii_hexdigit() {
-                        return false;
-                    }
-                }
+/// Every `%` is followed by two hexadecimal digits.
+fn is_valid_url_encoding(value: &[u8]) -> bool {
+    let mut i = 0;
+    while i < value.len() {
+        if value[i] == b'%' {
+            match value.get(i + 1..i + 3) {
+                Some([h, l]) if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() => i += 3,
                 _ => return false,
             }
+        } else {
+            i += 1;
         }
     }
-
-    true
-}
-
-/// Check for valid UTF-8 sequences (no overlong encodings, etc.).
-fn is_valid_utf8_sequence(s: &str) -> bool {
-    // Since Rust strings are always valid UTF-8, we mainly check for
-    // suspicious patterns that might indicate encoding attacks
-
-    // Check for null bytes
-    if s.contains('\0') {
-        return false;
-    }
-
-    // Check for overlong encoded sequences by looking for specific patterns
-    // that would have been decoded incorrectly
-    for &byte in s.as_bytes() {
-        // Check for sequences that look like they were overlong encoded
-        if byte == 0xC0 || byte == 0xC1 {
-            // These lead bytes are always overlong
-            return false;
-        }
-        if byte >= 0xF5 {
-            // Invalid lead bytes
-            return false;
-        }
-    }
-
     true
 }
 
@@ -95,16 +62,31 @@ mod tests {
 
     #[test]
     fn test_valid_url_encoding() {
-        assert!(is_valid_url_encoding("hello%20world"));
-        assert!(is_valid_url_encoding("test%2Fpath"));
-        assert!(!is_valid_url_encoding("hello%2"));
-        assert!(!is_valid_url_encoding("hello%GG"));
+        assert!(is_valid_url_encoding(b"hello%20world"));
+        assert!(is_valid_url_encoding(b"test%2Fpath"));
+        assert!(!is_valid_url_encoding(b"hello%2"));
+        assert!(!is_valid_url_encoding(b"hello%GG"));
     }
 
     #[test]
     fn test_validate_url_encoding_operator() {
         let op = ValidateUrlEncodingOperator;
-        assert!(!op.execute("hello%20world").matched); // Valid = no match
-        assert!(op.execute("hello%2").matched); // Invalid = match
+        assert!(!op.execute(b"hello%20world").matched); // Valid = no match
+        assert!(op.execute(b"hello%2").matched); // Invalid = match
+    }
+
+    #[test]
+    fn test_validate_utf8_encoding_operator() {
+        let op = ValidateUtf8EncodingOperator;
+        assert!(!op.execute("caf\u{e9}\0".as_bytes()).matched);
+        for invalid in [
+            &b"\xe9"[..],
+            b"\xc0\xaf",
+            b"\xed\xa0\x80",
+            b"\xf5\x80\x80\x80",
+            b"\xe2\x82",
+        ] {
+            assert!(op.execute(invalid).matched, "{invalid:?}");
+        }
     }
 }

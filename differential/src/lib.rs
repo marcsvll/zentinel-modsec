@@ -57,10 +57,12 @@ pub fn c(value: &str) -> Verdict {
 
 /// The engine's verdict, through the operators the rules call.
 pub fn engine(value: &str) -> Verdict {
-    let sqli = DetectSqliOperator.execute(value);
+    let sqli = DetectSqliOperator.execute(value.as_bytes());
     Verdict {
-        sqli: sqli.matched.then(|| sqli.matched_value.unwrap_or_default()),
-        xss: DetectXssOperator.execute(value).matched,
+        sqli: sqli
+            .matched
+            .then(|| String::from_utf8_lossy(&sqli.matched_value.unwrap_or_default()).into_owned()),
+        xss: DetectXssOperator.execute(value.as_bytes()).matched,
     }
 }
 

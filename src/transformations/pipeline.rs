@@ -82,12 +82,12 @@ impl TransformationPipeline {
     }
 
     /// Apply all transformations in sequence.
-    pub fn apply<'a>(&self, input: &'a str) -> Cow<'a, str> {
+    pub fn apply<'a>(&self, input: &'a [u8]) -> Cow<'a, [u8]> {
         if self.transformations.is_empty() {
             return Cow::Borrowed(input);
         }
 
-        let mut current: Cow<str> = Cow::Borrowed(input);
+        let mut current: Cow<[u8]> = Cow::Borrowed(input);
 
         for t in &self.transformations {
             current = match current {
@@ -95,7 +95,8 @@ impl TransformationPipeline {
                 Cow::Owned(s) => {
                     let transformed = t.transform(&s);
                     match transformed {
-                        Cow::Borrowed(_) => Cow::Owned(s),
+                        Cow::Borrowed(same) if same.len() == s.len() => Cow::Owned(s),
+                        Cow::Borrowed(part) => Cow::Owned(part.to_vec()),
                         Cow::Owned(new) => Cow::Owned(new),
                     }
                 }
@@ -107,15 +108,15 @@ impl TransformationPipeline {
 
     /// The value before any transformation and after each transformation that
     /// changed it, in order: what `multiMatch` runs the operator against.
-    pub fn apply_steps(&self, input: &str) -> Vec<String> {
-        let mut steps = vec![input.to_string()];
-        let mut current = input.to_string();
+    pub fn apply_steps(&self, input: &[u8]) -> Vec<Vec<u8>> {
+        let mut steps = vec![input.to_vec()];
+        let mut current = input.to_vec();
         for t in &self.transformations {
-            if let Cow::Owned(next) = t.transform(&current) {
-                if next != current {
-                    steps.push(next.clone());
-                    current = next;
-                }
+            let next = t.transform(&current);
+            if next.as_ref() != current.as_slice() {
+                let next = next.into_owned();
+                steps.push(next.clone());
+                current = next;
             }
         }
         steps
@@ -161,13 +162,13 @@ mod tests {
     #[test]
     fn test_empty_pipeline() {
         let pipeline = TransformationPipeline::new();
-        assert_eq!(pipeline.apply("hello"), "hello");
+        assert_eq!(pipeline.apply(b"hello").as_ref(), b"hello");
     }
 
     #[test]
     fn test_single_transformation() {
         let pipeline = TransformationPipeline::from_names(&["lowercase".to_string()]).unwrap();
-        assert_eq!(pipeline.apply("HELLO"), "hello");
+        assert_eq!(pipeline.apply(b"HELLO").as_ref(), b"hello");
     }
 
     #[test]
@@ -175,7 +176,7 @@ mod tests {
         let pipeline =
             TransformationPipeline::from_names(&["urlDecode".to_string(), "lowercase".to_string()])
                 .unwrap();
-        assert_eq!(pipeline.apply("HELLO%20WORLD"), "hello world");
+        assert_eq!(pipeline.apply(b"HELLO%20WORLD").as_ref(), b"hello world");
     }
 
     #[test]
@@ -211,6 +212,6 @@ mod tests {
         ])
         .unwrap();
         // Only uppercase should be applied
-        assert_eq!(pipeline.apply("hello"), "HELLO");
+        assert_eq!(pipeline.apply(b"hello").as_ref(), b"HELLO");
     }
 }

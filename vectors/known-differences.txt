@@ -1,0 +1,68 @@
+# Vectors of tests/modsecurity_vectors.rs (owasp-modsecurity/secrules-language-tests at the
+# commit vectors/fetch.sh pins) on which this engine differs from ModSecurity, with why.
+#
+#   <kind> <name> <index | *> <reason>
+#
+# A vector that differs and is not here fails the test; so does one listed by index that
+# has started to agree. `*` covers every vector of that name.
+
+# --- Decisions (patches/README.md, docs/DIFFERENTIALS.md of neblina) ------------------
+
+# %uXXXX is read through the built-in best-fit table (code page 20127) when no
+# SecUnicodeMapFile is given (0.11.0); ModSecurity's unit tests run without a table, so
+# %u00A0..%u00FF decode to the byte there and fold to ASCII here.
+tfn urlDecodeUni 5 built-in best-fit table (0.11.0)
+# An escape above FF that names a character decodes to that character in UTF-8, not to
+# its low byte (0.11.0 for %uXXXX; 0.12.0 for \uXXXX, &#NNNN; and CSS escapes).
+tfn urlDecodeUni 6 above FF: the character, not the low byte
+tfn urlDecodeUni 8 above FF: the character, not the low byte
+tfn cssDecode 3 above FF: the character, not the low byte
+# @within compares whole words of its argument; ModSecurity looks for the value anywhere
+# in the argument, so `ET` is "within" `GET POST` and an empty value is within anything.
+# CRS 911100 (`!@within %{tx.allowed_methods}`) is stricter here, on purpose.
+op within * whole words, not a substring of the argument
+
+# --- Not implemented ---------------------------------------------------------------------
+
+tfn phpArgsNames * not implemented (no CRS rule uses it)
+op rxGlobal * not implemented (no CRS rule uses it)
+op verifyCC * not implemented: never matches (no CRS rule uses it)
+op verifyssn * not implemented: never matches
+op verifycpf * not implemented: never matches
+op verifysvnr * not implemented: never matches
+# @containsWord is @contains: no word boundary check.
+op containsWord 3 no word boundary check
+op containsWord 4 no word boundary check
+op containsWord 5 no word boundary check
+op containsWord 13 no word boundary check
+
+# --- Differences in what an operator accepts ---------------------------------------------
+
+# Numeric operators: a value or argument that is not an integer does not match;
+# ModSecurity reads it as 0.
+op eq 0 not an integer: no match
+op eq 2 not an integer: no match
+op eq 5 not an integer: no match
+op ge 0 not an integer: no match
+op ge 2 not an integer: no match
+op ge 4 not an integer: no match
+op gt 2 not an integer: no match
+op gt 4 not an integer: no match
+op le 0 not an integer: no match
+op le 1 not an integer: no match
+op le 3 not an integer: no match
+op le 4 not an integer: no match
+op le 5 not an integer: no match
+op lt 1 not an integer: no match
+op lt 3 not an integer: no match
+op lt 5 not an integer: no match
+# An empty pattern, and a pattern with lookaround (PCRE), are load errors here (ADR-0006:
+# the regex crate is linear; such CRS rules go through the PCRE2 fallback of the IR path).
+op rx 1 empty pattern is a load error
+op rx 3 empty pattern is a load error
+op rx 11 lookahead is a load error
+op rx 12 lookahead is a load error
+# A network with a prefix longer than the address is a load error, not ignored.
+op ipMatch 16 invalid prefix is a load error
+# A range list with nothing to parse allows no byte here; ModSecurity allows all.
+op validateByteRange 3 an argument with no range allows nothing

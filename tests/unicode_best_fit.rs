@@ -8,10 +8,11 @@ use zentinel_modsec::transformations::create_transformation;
 use zentinel_modsec::ModSecurity;
 
 fn decoded(input: &str) -> String {
-    create_transformation("urlDecodeUni")
+    let out = create_transformation("urlDecodeUni")
         .unwrap()
-        .transform(input)
-        .into_owned()
+        .transform(input.as_bytes())
+        .into_owned();
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[test]

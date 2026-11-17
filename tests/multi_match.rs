@@ -45,9 +45,9 @@ fn a_transformation_that_changes_nothing_adds_no_step() {
     use zentinel_modsec::transformations::TransformationPipeline;
     let p =
         TransformationPipeline::from_names(&["lowercase".into(), "urlDecodeUni".into()]).unwrap();
-    assert_eq!(p.apply_steps("abc"), vec!["abc".to_string()]);
+    assert_eq!(p.apply_steps(b"abc"), vec![b"abc".to_vec()]);
     assert_eq!(
-        p.apply_steps("A+b"),
-        vec!["A+b".to_string(), "a+b".to_string(), "a b".to_string()]
+        p.apply_steps(b"A+b"),
+        vec![b"A+b".to_vec(), b"a+b".to_vec(), b"a b".to_vec()]
     );
 }

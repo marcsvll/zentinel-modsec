@@ -7,9 +7,13 @@ use std::borrow::Cow;
 pub struct Base64Encode;
 
 impl Transformation for Base64Encode {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+    fn transform<'a>(&self, input: &'a [u8]) -> Cow<'a, [u8]> {
         use base64::Engine;
-        Cow::Owned(base64::engine::general_purpose::STANDARD.encode(input))
+        Cow::Owned(
+            base64::engine::general_purpose::STANDARD
+                .encode(input)
+                .into_bytes(),
+        )
     }
 
     fn name(&self) -> &'static str {
@@ -17,13 +21,12 @@ impl Transformation for Base64Encode {
     }
 }
 
-/// Hex encode transformation.
+/// Hex encode transformation (lower-case digits).
 pub struct HexEncode;
 
 impl Transformation for HexEncode {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
-        let encoded: String = input.bytes().map(|b| format!("{:02x}", b)).collect();
-        Cow::Owned(encoded)
+    fn transform<'a>(&self, input: &'a [u8]) -> Cow<'a, [u8]> {
+        Cow::Owned(hex::encode(input).into_bytes())
     }
 
     fn name(&self) -> &'static str {
@@ -32,17 +35,29 @@ impl Transformation for HexEncode {
 }
 
 /// URL encode transformation.
+///
+/// As ModSecurity: ASCII letters, digits and `*` stay, a space is `+`, and
+/// every other byte is `%` and two lower-case hexadecimal digits.
 pub struct UrlEncode;
 
 impl Transformation for UrlEncode {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
-        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-        let encoded = utf8_percent_encode(input, NON_ALPHANUMERIC).to_string();
-        if encoded == input {
-            Cow::Borrowed(input)
-        } else {
-            Cow::Owned(encoded)
+    fn transform<'a>(&self, input: &'a [u8]) -> Cow<'a, [u8]> {
+        let kept = |b: u8| b.is_ascii_alphanumeric() || b == b'*';
+        if input.iter().all(|&b| kept(b)) {
+            return Cow::Borrowed(input);
         }
+        let mut out = Vec::with_capacity(input.len() * 3);
+        for &b in input {
+            if kept(b) {
+                out.push(b);
+            } else if b == b' ' {
+                out.push(b'+');
+            } else {
+                out.push(b'%');
+                out.extend_from_slice(hex::encode([b]).as_bytes());
+            }
+        }
+        Cow::Owned(out)
     }
 
     fn name(&self) -> &'static str {
@@ -50,16 +65,14 @@ impl Transformation for UrlEncode {
     }
 }
 
-/// MD5 hash transformation.
+/// MD5 hash transformation: the 16 bytes of the digest, as ModSecurity
+/// gives them (not hexadecimal).
 pub struct Md5;
 
 impl Transformation for Md5 {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+    fn transform<'a>(&self, input: &'a [u8]) -> Cow<'a, [u8]> {
         use md5::{Digest, Md5 as Md5Hasher};
-        let mut hasher = Md5Hasher::new();
-        hasher.update(input.as_bytes());
-        let result = hasher.finalize();
-        Cow::Owned(format!("{:x}", result))
+        Cow::Owned(Md5Hasher::digest(input).to_vec())
     }
 
     fn name(&self) -> &'static str {
@@ -67,16 +80,14 @@ impl Transformation for Md5 {
     }
 }
 
-/// SHA1 hash transformation.
+/// SHA1 hash transformation: the 20 bytes of the digest, as ModSecurity
+/// gives them (not hexadecimal).
 pub struct Sha1;
 
 impl Transformation for Sha1 {
-    fn transform<'a>(&self, input: &'a str) -> Cow<'a, str> {
+    fn transform<'a>(&self, input: &'a [u8]) -> Cow<'a, [u8]> {
         use sha1::{Digest, Sha1 as Sha1Hasher};
-        let mut hasher = Sha1Hasher::new();
-        hasher.update(input.as_bytes());
-        let result = hasher.finalize();
-        Cow::Owned(format!("{:x}", result))
+        Cow::Owned(Sha1Hasher::digest(input).to_vec())
     }
 
     fn name(&self) -> &'static str {
@@ -90,29 +101,31 @@ mod tests {
 
     #[test]
     fn test_base64_encode() {
-        let t = Base64Encode;
-        assert_eq!(t.transform("hello"), "aGVsbG8=");
+        assert_eq!(Base64Encode.transform(b"hello").as_ref(), b"aGVsbG8=");
     }
 
     #[test]
     fn test_hex_encode() {
-        let t = HexEncode;
-        assert_eq!(t.transform("AB"), "4142");
+        assert_eq!(HexEncode.transform(b"A\xff").as_ref(), b"41ff");
+    }
+
+    #[test]
+    fn test_url_encode() {
+        assert_eq!(UrlEncode.transform(b"a b/\xe9*").as_ref(), b"a+b%2f%e9*");
     }
 
     #[test]
     fn test_md5() {
-        let t = Md5;
-        // MD5 of "hello"
-        assert_eq!(t.transform("hello"), "5d41402abc4b2a76b9719d911017c592");
+        assert_eq!(
+            hex::encode(Md5.transform(b"hello")),
+            "5d41402abc4b2a76b9719d911017c592"
+        );
     }
 
     #[test]
     fn test_sha1() {
-        let t = Sha1;
-        // SHA1 of "hello"
         assert_eq!(
-            t.transform("hello"),
+            hex::encode(Sha1.transform(b"hello")),
             "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
         );
     }

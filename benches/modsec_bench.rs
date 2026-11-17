@@ -313,46 +313,46 @@ fn bench_operators(c: &mut Criterion) {
     // Regex operator
     let rx = create_operator(OperatorName::Rx, r"(?i)select.*from").unwrap();
     group.bench_function("rx_match", |b| {
-        b.iter(|| rx.execute(std::hint::black_box("SELECT * FROM users")))
+        b.iter(|| rx.execute(std::hint::black_box(b"SELECT * FROM users")))
     });
     group.bench_function("rx_no_match", |b| {
-        b.iter(|| rx.execute(std::hint::black_box("hello world")))
+        b.iter(|| rx.execute(std::hint::black_box(b"hello world")))
     });
 
     // Pattern match operator
     let pm = create_operator(OperatorName::Pm, "select union insert delete").unwrap();
     group.bench_function("pm_match", |b| {
-        b.iter(|| pm.execute(std::hint::black_box("trying to union the data")))
+        b.iter(|| pm.execute(std::hint::black_box(b"trying to union the data")))
     });
     group.bench_function("pm_no_match", |b| {
-        b.iter(|| pm.execute(std::hint::black_box("normal user input here")))
+        b.iter(|| pm.execute(std::hint::black_box(b"normal user input here")))
     });
 
     // SQL injection detection
     let sqli = create_operator(OperatorName::DetectSqli, "").unwrap();
     group.bench_function("detectSQLi_attack", |b| {
-        b.iter(|| sqli.execute(std::hint::black_box("1' OR '1'='1")))
+        b.iter(|| sqli.execute(std::hint::black_box(b"1' OR '1'='1")))
     });
     group.bench_function("detectSQLi_clean", |b| {
-        b.iter(|| sqli.execute(std::hint::black_box("normal search query")))
+        b.iter(|| sqli.execute(std::hint::black_box(b"normal search query")))
     });
 
     // XSS detection
     let xss = create_operator(OperatorName::DetectXss, "").unwrap();
     group.bench_function("detectXSS_attack", |b| {
-        b.iter(|| xss.execute(std::hint::black_box("<script>alert(1)</script>")))
+        b.iter(|| xss.execute(std::hint::black_box(b"<script>alert(1)</script>")))
     });
     group.bench_function("detectXSS_clean", |b| {
-        b.iter(|| xss.execute(std::hint::black_box("normal text content")))
+        b.iter(|| xss.execute(std::hint::black_box(b"normal text content")))
     });
 
     // Contains operator
     let contains = create_operator(OperatorName::Contains, "/admin").unwrap();
     group.bench_function("contains_match", |b| {
-        b.iter(|| contains.execute(std::hint::black_box("/api/admin/users")))
+        b.iter(|| contains.execute(std::hint::black_box(b"/api/admin/users")))
     });
     group.bench_function("contains_no_match", |b| {
-        b.iter(|| contains.execute(std::hint::black_box("/api/users/profile")))
+        b.iter(|| contains.execute(std::hint::black_box(b"/api/users/profile")))
     });
 
     group.finish();
@@ -370,13 +370,13 @@ fn bench_transformations(c: &mut Criterion) {
     // URL decode
     let urldecode = create_transformation("urlDecode").unwrap();
     group.bench_function("urlDecode", |b| {
-        b.iter(|| urldecode.transform(std::hint::black_box("hello%20world%21")))
+        b.iter(|| urldecode.transform(std::hint::black_box(b"hello%20world%21")))
     });
 
     // Base64 decode
     let b64decode = create_transformation("base64Decode").unwrap();
     group.bench_function("base64Decode", |b| {
-        b.iter(|| b64decode.transform(std::hint::black_box("SGVsbG8gV29ybGQh")))
+        b.iter(|| b64decode.transform(std::hint::black_box(b"SGVsbG8gV29ybGQh")))
     });
 
     // HTML entity decode
@@ -384,7 +384,7 @@ fn bench_transformations(c: &mut Criterion) {
     group.bench_function("htmlEntityDecode", |b| {
         b.iter(|| {
             htmldecode.transform(std::hint::black_box(
-                "&lt;script&gt;alert(1)&lt;/script&gt;",
+                b"&lt;script&gt;alert(1)&lt;/script&gt;",
             ))
         })
     });
@@ -392,19 +392,19 @@ fn bench_transformations(c: &mut Criterion) {
     // Lowercase
     let lowercase = create_transformation("lowercase").unwrap();
     group.bench_function("lowercase", |b| {
-        b.iter(|| lowercase.transform(std::hint::black_box("HELLO WORLD")))
+        b.iter(|| lowercase.transform(std::hint::black_box(b"HELLO WORLD")))
     });
 
     // Normalize path
     let normpath = create_transformation("normalizePath").unwrap();
     group.bench_function("normalizePath", |b| {
-        b.iter(|| normpath.transform(std::hint::black_box("/foo/../bar/./baz")))
+        b.iter(|| normpath.transform(std::hint::black_box(b"/foo/../bar/./baz")))
     });
 
     // Command line
     let cmdline = create_transformation("cmdLine").unwrap();
     group.bench_function("cmdLine", |b| {
-        b.iter(|| cmdline.transform(std::hint::black_box("CMD;/C;DIR")))
+        b.iter(|| cmdline.transform(std::hint::black_box(b"CMD;/C;DIR")))
     });
 
     group.finish();

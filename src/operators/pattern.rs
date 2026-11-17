@@ -6,7 +6,6 @@ use super::traits::{Operator, OperatorResult};
 use crate::error::{Error, Result};
 use aho_corasick::AhoCorasick;
 use once_cell::sync::OnceCell;
-use regex::Regex;
 
 /// How a pattern is compiled.
 ///
@@ -23,10 +22,10 @@ enum Mode {
     Characters,
 }
 
-enum Compiled {
-    Bytes(regex::bytes::Regex),
-    Characters(Regex),
-}
+/// Both modes run over bytes; in [`Mode::Characters`] the pattern's classes
+/// and `.` are Unicode-aware and match UTF-8 sequences (bytes that are not
+/// UTF-8 match no character).
+type Compiled = regex::bytes::Regex;
 
 /// The pattern as the `regex` crate needs it to mean bytes. With Unicode off,
 /// `\xHH` is a byte there, but `\x{HH}` stays a code point (`\x{e2}` would
@@ -133,13 +132,9 @@ impl RxOperator {
     fn get_regex(&self) -> Option<&Compiled> {
         self.compiled
             .get_or_init(|| {
-                let compiled = match self.mode {
-                    Mode::Bytes => regex::bytes::RegexBuilder::new(&self.pattern_str)
-                        .unicode(false)
-                        .build()
-                        .map(Compiled::Bytes),
-                    Mode::Characters => Regex::new(&self.pattern_str).map(Compiled::Characters),
-                };
+                let compiled = regex::bytes::RegexBuilder::new(&self.pattern_str)
+                    .unicode(self.mode == Mode::Characters)
+                    .build();
                 match compiled {
                     Ok(regex) => Some(regex),
                     Err(e) => {
@@ -156,15 +151,8 @@ impl RxOperator {
     }
 }
 
-/// A match and its groups as text. A group matched over bytes can end inside
-/// a character; what is published is then the text with the cut character
-/// replaced, as everything else here is text.
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
 impl Operator for RxOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
         let Some(regex) = self.get_regex() else {
             return OperatorResult::no_match();
         };
@@ -173,43 +161,22 @@ impl Operator for RxOperator {
         // room for all of them before searching -- several hundred bytes for
         // the larger CRS patterns, on every value of every rule -- so ask
         // first whether there is a match at all, which reserves nothing.
-        match regex {
-            Compiled::Bytes(regex) => {
-                if !regex.is_match(value.as_bytes()) {
-                    return OperatorResult::no_match();
-                }
-                let Some(captures) = regex.captures(value.as_bytes()) else {
-                    return OperatorResult::no_match();
-                };
-                OperatorResult {
-                    matched: true,
-                    matched_value: captures.get(0).map(|m| text(m.as_bytes())),
-                    // A group that did not take part keeps its slot, empty, so
-                    // TX:2 is always the second group.
-                    captures: captures
-                        .iter()
-                        .skip(1)
-                        .map(|c| c.map(|m| text(m.as_bytes())).unwrap_or_default())
-                        .collect(),
-                }
-            }
-            Compiled::Characters(regex) => {
-                if !regex.is_match(value) {
-                    return OperatorResult::no_match();
-                }
-                let Some(captures) = regex.captures(value) else {
-                    return OperatorResult::no_match();
-                };
-                OperatorResult {
-                    matched: true,
-                    matched_value: captures.get(0).map(|m| m.as_str().to_string()),
-                    captures: captures
-                        .iter()
-                        .skip(1)
-                        .map(|c| c.map(|m| m.as_str().to_string()).unwrap_or_default())
-                        .collect(),
-                }
-            }
+        if !regex.is_match(value) {
+            return OperatorResult::no_match();
+        }
+        let Some(captures) = regex.captures(value) else {
+            return OperatorResult::no_match();
+        };
+        OperatorResult {
+            matched: true,
+            matched_value: captures.get(0).map(|m| m.as_bytes().to_vec()),
+            // A group that did not take part keeps its slot, empty, so TX:2 is
+            // always the second group.
+            captures: captures
+                .iter()
+                .skip(1)
+                .map(|c| c.map(|m| m.as_bytes().to_vec()).unwrap_or_default())
+                .collect(),
         }
     }
 
@@ -312,10 +279,10 @@ impl PmOperator {
 }
 
 impl Operator for PmOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
         if let Some(mat) = self.automaton.find(value) {
             let matched = &self.patterns[mat.pattern().as_usize()];
-            OperatorResult::matched(matched.clone())
+            OperatorResult::matched(matched.as_bytes())
         } else {
             OperatorResult::no_match()
         }
@@ -333,29 +300,29 @@ mod tests {
     #[test]
     fn test_rx_simple() {
         let op = RxOperator::new("^admin").unwrap();
-        assert!(op.execute("admin").matched);
-        assert!(!op.execute("user").matched);
+        assert!(op.execute(b"admin").matched);
+        assert!(!op.execute(b"user").matched);
     }
 
     #[test]
     fn test_rx_captures() {
         let op = RxOperator::new(r"user=(\w+)").unwrap();
-        let result = op.execute("user=john");
+        let result = op.execute(b"user=john");
         assert!(result.matched);
-        assert_eq!(result.captures, vec!["john"]);
+        assert_eq!(result.captures, vec![b"john".to_vec()]);
     }
 
     #[test]
     fn test_pm_simple() {
         let op = PmOperator::new("admin root user").unwrap();
-        assert!(op.execute("the admin user").matched);
-        assert!(!op.execute("guest").matched);
+        assert!(op.execute(b"the admin user").matched);
+        assert!(!op.execute(b"guest").matched);
     }
 
     #[test]
     fn test_pm_case_insensitive() {
         let op = PmOperator::new("ADMIN").unwrap();
-        assert!(op.execute("admin").matched);
-        assert!(op.execute("Admin").matched);
+        assert!(op.execute(b"admin").matched);
+        assert!(op.execute(b"Admin").matched);
     }
 }

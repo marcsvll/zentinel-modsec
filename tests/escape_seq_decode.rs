@@ -4,10 +4,11 @@
 use zentinel_modsec::transformations::create_transformation;
 
 fn decoded(input: &str) -> String {
-    create_transformation("escapeSeqDecode")
+    let out = create_transformation("escapeSeqDecode")
         .unwrap()
-        .transform(input)
-        .into_owned()
+        .transform(input.as_bytes())
+        .into_owned();
+    String::from_utf8(out).expect("these escapes decode to text")
 }
 
 #[test]

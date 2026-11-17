@@ -31,7 +31,7 @@ fn a_value_with_nothing_to_transform_costs_no_allocation() {
     ] {
         let t = create_transformation(name).expect("known transformation");
         let before = allocations();
-        let unchanged = matches!(t.transform("ordinaryvalue123"), Cow::Borrowed(_));
+        let unchanged = matches!(t.transform(b"ordinaryvalue123"), Cow::Borrowed(_));
         assert_eq!(allocations() - before, 0, "{name} allocated");
         assert!(unchanged, "{name} copied a value it did not change");
     }
@@ -56,6 +56,10 @@ fn a_value_with_something_to_transform_is_still_transformed() {
     ];
     for (name, input, expected) in cases {
         let t = create_transformation(name).expect("known transformation");
-        assert_eq!(t.transform(input), expected, "{name} on {input:?}");
+        assert_eq!(
+            t.transform(input.as_bytes()).as_ref(),
+            expected.as_bytes(),
+            "{name} on {input:?}"
+        );
     }
 }

@@ -19,3 +19,4 @@ Cargo.lock
 /differential/fuzz/corpus
 /differential/fuzz/artifacts
 /differential/fuzz/Cargo.lock
+/vectors/secrules-language-tests

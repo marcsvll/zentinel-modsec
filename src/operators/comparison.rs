@@ -1,24 +1,33 @@
 //! Comparison operators (@contains, @eq, @gt, etc.).
+//!
+//! The string comparisons are over bytes. Their argument can come from the
+//! request through a macro (`@streq %{request_headers.host}`), so it is taken
+//! as bytes too.
 
 use super::traits::{Operator, OperatorResult};
 
 /// Contains operator (@contains).
 pub struct ContainsOperator {
-    needle: String,
+    needle: Vec<u8>,
 }
 
 impl ContainsOperator {
     /// Create the operator from its SecLang argument.
-    pub fn new(needle: &str) -> Self {
+    pub fn new(needle: impl AsRef<[u8]>) -> Self {
         Self {
-            needle: needle.to_string(),
+            needle: needle.as_ref().to_vec(),
         }
     }
 }
 
+/// Whether `needle` occurs in `haystack`.
+pub(crate) fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 impl Operator for ContainsOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        if value.contains(&self.needle) {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
+        if contains(value, &self.needle) {
             OperatorResult::matched(self.needle.clone())
         } else {
             OperatorResult::no_match()
@@ -30,22 +39,22 @@ impl Operator for ContainsOperator {
     }
 }
 
-/// BeginsWith operator (@beginsWith).
+/// Begins with operator (@beginsWith).
 pub struct BeginsWithOperator {
-    prefix: String,
+    prefix: Vec<u8>,
 }
 
 impl BeginsWithOperator {
     /// Create the operator from its SecLang argument.
-    pub fn new(prefix: &str) -> Self {
+    pub fn new(prefix: impl AsRef<[u8]>) -> Self {
         Self {
-            prefix: prefix.to_string(),
+            prefix: prefix.as_ref().to_vec(),
         }
     }
 }
 
 impl Operator for BeginsWithOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
         if value.starts_with(&self.prefix) {
             OperatorResult::matched(self.prefix.clone())
         } else {
@@ -58,22 +67,22 @@ impl Operator for BeginsWithOperator {
     }
 }
 
-/// EndsWith operator (@endsWith).
+/// Ends with operator (@endsWith).
 pub struct EndsWithOperator {
-    suffix: String,
+    suffix: Vec<u8>,
 }
 
 impl EndsWithOperator {
     /// Create the operator from its SecLang argument.
-    pub fn new(suffix: &str) -> Self {
+    pub fn new(suffix: impl AsRef<[u8]>) -> Self {
         Self {
-            suffix: suffix.to_string(),
+            suffix: suffix.as_ref().to_vec(),
         }
     }
 }
 
 impl Operator for EndsWithOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
         if value.ends_with(&self.suffix) {
             OperatorResult::matched(self.suffix.clone())
         } else {
@@ -86,24 +95,24 @@ impl Operator for EndsWithOperator {
     }
 }
 
-/// String equals operator (@streq).
+/// String equality operator (@streq).
 pub struct StreqOperator {
-    expected: String,
+    expected: Vec<u8>,
 }
 
 impl StreqOperator {
     /// Create the operator from its SecLang argument.
-    pub fn new(expected: &str) -> Self {
+    pub fn new(expected: impl AsRef<[u8]>) -> Self {
         Self {
-            expected: expected.to_string(),
+            expected: expected.as_ref().to_vec(),
         }
     }
 }
 
 impl Operator for StreqOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        if value == self.expected {
-            OperatorResult::matched(value.to_string())
+    fn execute(&self, value: &[u8]) -> OperatorResult {
+        if value == self.expected.as_slice() {
+            OperatorResult::matched(value)
         } else {
             OperatorResult::no_match()
         }
@@ -114,200 +123,84 @@ impl Operator for StreqOperator {
     }
 }
 
-/// Numeric equals operator (@eq).
-/// Supports both numeric literals and variable references (e.g., %{tx.var}).
-pub struct EqOperator {
-    /// The argument (may be a number or variable reference).
-    arg: String,
+/// A value read as a decimal integer, or `None` when it is not one.
+pub(crate) fn integer(value: &[u8]) -> Option<i64> {
+    std::str::from_utf8(value).ok()?.parse().ok()
 }
 
-impl EqOperator {
-    /// Create the operator from its SecLang argument.
-    pub fn new(value: &str) -> Self {
-        Self {
-            arg: value.to_string(),
-        }
+/// The integer an argument names, unless it still holds a macro (which the
+/// transaction expands before the operator runs).
+fn target(arg: &[u8]) -> Option<i64> {
+    if arg.windows(2).any(|w| w == b"%{") {
+        return None;
     }
-
-    fn target_value(&self) -> Option<i64> {
-        // If it's a variable reference, we can't resolve it statically
-        if self.arg.contains("%{") {
-            return None;
-        }
-        self.arg.parse().ok()
-    }
+    integer(arg)
 }
 
-impl Operator for EqOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        if let Some(target) = self.target_value() {
-            if let Ok(n) = value.parse::<i64>() {
-                if n == target {
-                    return OperatorResult::matched(value.to_string());
+/// A numeric comparison: `@eq`, `@gt`, `@lt`, `@ge`, `@le`. A value or an
+/// argument that is not an integer does not match.
+macro_rules! numeric_operator {
+    ($(#[$doc:meta])* $name:ident, $label:literal, $cmp:expr) => {
+        $(#[$doc])*
+        pub struct $name {
+            target: Option<i64>,
+        }
+
+        impl $name {
+            /// Create the operator from its SecLang argument.
+            pub fn new(value: impl AsRef<[u8]>) -> Self {
+                Self {
+                    target: target(value.as_ref()),
                 }
             }
         }
-        // For variable references, comparison would need runtime resolution
-        // For now, we don't match if we can't resolve
-        OperatorResult::no_match()
-    }
 
-    fn name(&self) -> &'static str {
-        "eq"
-    }
-}
-
-/// Greater than operator (@gt).
-pub struct GtOperator {
-    arg: String,
-}
-
-impl GtOperator {
-    /// Create the operator from its SecLang argument.
-    pub fn new(value: &str) -> Self {
-        Self {
-            arg: value.to_string(),
-        }
-    }
-
-    fn target_value(&self) -> Option<i64> {
-        if self.arg.contains("%{") {
-            return None;
-        }
-        self.arg.parse().ok()
-    }
-}
-
-impl Operator for GtOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        if let Some(target) = self.target_value() {
-            if let Ok(n) = value.parse::<i64>() {
-                if n > target {
-                    return OperatorResult::matched(value.to_string());
+        impl Operator for $name {
+            fn execute(&self, value: &[u8]) -> OperatorResult {
+                let compare: fn(i64, i64) -> bool = $cmp;
+                match (integer(value), self.target) {
+                    (Some(n), Some(target)) if compare(n, target) => OperatorResult::matched(value),
+                    _ => OperatorResult::no_match(),
                 }
             }
-        }
-        OperatorResult::no_match()
-    }
 
-    fn name(&self) -> &'static str {
-        "gt"
-    }
-}
-
-/// Less than operator (@lt).
-pub struct LtOperator {
-    arg: String,
-}
-
-impl LtOperator {
-    /// Create the operator from its SecLang argument.
-    pub fn new(value: &str) -> Self {
-        Self {
-            arg: value.to_string(),
-        }
-    }
-
-    fn target_value(&self) -> Option<i64> {
-        if self.arg.contains("%{") {
-            return None;
-        }
-        self.arg.parse().ok()
-    }
-}
-
-impl Operator for LtOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        if let Some(target) = self.target_value() {
-            if let Ok(n) = value.parse::<i64>() {
-                if n < target {
-                    return OperatorResult::matched(value.to_string());
-                }
+            fn name(&self) -> &'static str {
+                $label
             }
         }
-        OperatorResult::no_match()
-    }
-
-    fn name(&self) -> &'static str {
-        "lt"
-    }
+    };
 }
 
-/// Greater than or equal operator (@ge).
-pub struct GeOperator {
-    arg: String,
-}
-
-impl GeOperator {
-    /// Create the operator from its SecLang argument.
-    pub fn new(value: &str) -> Self {
-        Self {
-            arg: value.to_string(),
-        }
-    }
-
-    fn target_value(&self) -> Option<i64> {
-        if self.arg.contains("%{") {
-            return None;
-        }
-        self.arg.parse().ok()
-    }
-}
-
-impl Operator for GeOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        if let Some(target) = self.target_value() {
-            if let Ok(n) = value.parse::<i64>() {
-                if n >= target {
-                    return OperatorResult::matched(value.to_string());
-                }
-            }
-        }
-        OperatorResult::no_match()
-    }
-
-    fn name(&self) -> &'static str {
-        "ge"
-    }
-}
-
-/// Less than or equal operator (@le).
-pub struct LeOperator {
-    arg: String,
-}
-
-impl LeOperator {
-    /// Create the operator from its SecLang argument.
-    pub fn new(value: &str) -> Self {
-        Self {
-            arg: value.to_string(),
-        }
-    }
-
-    fn target_value(&self) -> Option<i64> {
-        if self.arg.contains("%{") {
-            return None;
-        }
-        self.arg.parse().ok()
-    }
-}
-
-impl Operator for LeOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        if let Some(target) = self.target_value() {
-            if let Ok(n) = value.parse::<i64>() {
-                if n <= target {
-                    return OperatorResult::matched(value.to_string());
-                }
-            }
-        }
-        OperatorResult::no_match()
-    }
-
-    fn name(&self) -> &'static str {
-        "le"
-    }
-}
+numeric_operator!(
+    /// Numeric equality operator (@eq).
+    EqOperator,
+    "eq",
+    |n, t| n == t
+);
+numeric_operator!(
+    /// Greater than operator (@gt).
+    GtOperator,
+    "gt",
+    |n, t| n > t
+);
+numeric_operator!(
+    /// Less than operator (@lt).
+    LtOperator,
+    "lt",
+    |n, t| n < t
+);
+numeric_operator!(
+    /// Greater than or equal operator (@ge).
+    GeOperator,
+    "ge",
+    |n, t| n >= t
+);
+numeric_operator!(
+    /// Less than or equal operator (@le).
+    LeOperator,
+    "le",
+    |n, t| n <= t
+);
 
 #[cfg(test)]
 mod tests {
@@ -316,43 +209,50 @@ mod tests {
     #[test]
     fn test_contains() {
         let op = ContainsOperator::new("admin");
-        assert!(op.execute("/admin/users").matched);
-        assert!(!op.execute("/users").matched);
+        assert!(op.execute(b"/admin/users").matched);
+        assert!(!op.execute(b"/users").matched);
+        assert!(
+            ContainsOperator::new(b"\xac\xed")
+                .execute(b"x\xac\xed\x00")
+                .matched
+        );
     }
 
     #[test]
     fn test_begins_with() {
         let op = BeginsWithOperator::new("/admin");
-        assert!(op.execute("/admin/users").matched);
-        assert!(!op.execute("/users/admin").matched);
+        assert!(op.execute(b"/admin/users").matched);
+        assert!(!op.execute(b"/users/admin").matched);
     }
 
     #[test]
     fn test_ends_with() {
         let op = EndsWithOperator::new(".php");
-        assert!(op.execute("index.php").matched);
-        assert!(!op.execute("index.html").matched);
+        assert!(op.execute(b"index.php").matched);
+        assert!(!op.execute(b"index.html").matched);
     }
 
     #[test]
     fn test_streq() {
         let op = StreqOperator::new("admin");
-        assert!(op.execute("admin").matched);
-        assert!(!op.execute("Admin").matched);
+        assert!(op.execute(b"admin").matched);
+        assert!(!op.execute(b"Admin").matched);
     }
 
     #[test]
     fn test_numeric_operators() {
         let eq = EqOperator::new("10");
-        assert!(eq.execute("10").matched);
-        assert!(!eq.execute("11").matched);
+        assert!(eq.execute(b"10").matched);
+        assert!(!eq.execute(b"11").matched);
 
         let gt = GtOperator::new("10");
-        assert!(gt.execute("11").matched);
-        assert!(!gt.execute("10").matched);
+        assert!(gt.execute(b"11").matched);
+        assert!(!gt.execute(b"10").matched);
 
         let lt = LtOperator::new("10");
-        assert!(lt.execute("9").matched);
-        assert!(!lt.execute("10").matched);
+        assert!(lt.execute(b"9").matched);
+        assert!(!lt.execute(b"10").matched);
+
+        assert!(!EqOperator::new("0").execute(b"\xff").matched);
     }
 }

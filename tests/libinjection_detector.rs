@@ -5,11 +5,11 @@
 use zentinel_modsec::operators::{DetectSqliOperator, DetectXssOperator, Operator};
 
 fn sqli(value: &str) -> bool {
-    DetectSqliOperator.execute(value).matched
+    DetectSqliOperator.execute(value.as_bytes()).matched
 }
 
 fn xss(value: &str) -> bool {
-    DetectXssOperator.execute(value).matched
+    DetectXssOperator.execute(value.as_bytes()).matched
 }
 
 #[test]
@@ -40,9 +40,9 @@ fn sql_injection_is_reported() {
 
 #[test]
 fn detect_sqli_reports_the_fingerprint() {
-    let result = DetectSqliOperator.execute("1' OR '1'='1");
+    let result = DetectSqliOperator.execute(b"1' OR '1'='1");
     assert!(result.matched);
-    assert_eq!(result.matched_value.as_deref(), Some("s&sos"));
+    assert_eq!(result.matched_value.as_deref(), Some(&b"s&sos"[..]));
 }
 
 #[test]
@@ -78,10 +78,10 @@ fn what_the_translation_missed_and_the_c_library_reports() {
         ("1; CREATE OR REPLACE FUNCTION SLEEP(int)", "1;Tkf"),
         ("1 into outfile 'a'", "1ks"),
     ] {
-        let result = DetectSqliOperator.execute(value);
+        let result = DetectSqliOperator.execute(value.as_bytes());
         assert_eq!(
             result.matched_value.as_deref(),
-            Some(fingerprint),
+            Some(fingerprint.as_bytes()),
             "{value:?}"
         );
     }

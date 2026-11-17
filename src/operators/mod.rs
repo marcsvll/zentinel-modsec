@@ -85,7 +85,7 @@ pub fn compile_operator(spec: &OperatorSpec) -> Result<Arc<dyn Operator>> {
 pub struct NoMatchOperator;
 
 impl Operator for NoMatchOperator {
-    fn execute(&self, _value: &str) -> OperatorResult {
+    fn execute(&self, _value: &[u8]) -> OperatorResult {
         OperatorResult::no_match()
     }
 
@@ -98,8 +98,8 @@ impl Operator for NoMatchOperator {
 pub struct UnconditionalMatchOperator;
 
 impl Operator for UnconditionalMatchOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        OperatorResult::matched(value.to_string())
+    fn execute(&self, value: &[u8]) -> OperatorResult {
+        OperatorResult::matched(value)
     }
 
     fn name(&self) -> &'static str {
@@ -136,16 +136,16 @@ impl ValidateByteRangeOperator {
 }
 
 impl Operator for ValidateByteRangeOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
         // Check if all bytes are within the allowed ranges
-        for byte in value.bytes() {
+        for &byte in value {
             let valid = self
                 .ranges
                 .iter()
                 .any(|(start, end)| byte >= *start && byte <= *end);
             if !valid {
                 // Invalid byte found - this is a match (rule should trigger)
-                return OperatorResult::matched(format!("invalid byte: {}", byte));
+                return OperatorResult::matched(format!("invalid byte: {byte}"));
             }
         }
         OperatorResult::no_match()
@@ -158,22 +158,27 @@ impl Operator for ValidateByteRangeOperator {
 
 /// Within operator - checks if value is within a list of values.
 pub struct WithinOperator {
-    values: Vec<String>,
+    values: Vec<Vec<u8>>,
 }
 
 impl WithinOperator {
     /// Create a new within operator.
-    pub fn new(values: &str) -> Self {
+    pub fn new(values: impl AsRef<[u8]>) -> Self {
         Self {
-            values: values.split_whitespace().map(|s| s.to_string()).collect(),
+            values: values
+                .as_ref()
+                .split(|b| b.is_ascii_whitespace())
+                .filter(|v| !v.is_empty())
+                .map(<[u8]>::to_vec)
+                .collect(),
         }
     }
 }
 
 impl Operator for WithinOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        if self.values.iter().any(|v| v == value) {
-            OperatorResult::matched(value.to_string())
+    fn execute(&self, value: &[u8]) -> OperatorResult {
+        if self.values.iter().any(|v| v.as_slice() == value) {
+            OperatorResult::matched(value)
         } else {
             OperatorResult::no_match()
         }
@@ -186,28 +191,31 @@ impl Operator for WithinOperator {
 
 /// Not equal operator.
 pub struct NeOperator {
-    expected: String,
+    expected: Vec<u8>,
 }
 
 impl NeOperator {
     /// Create a new not-equal operator.
-    pub fn new(expected: &str) -> Self {
+    pub fn new(expected: impl AsRef<[u8]>) -> Self {
         Self {
-            expected: expected.to_string(),
+            expected: expected.as_ref().to_vec(),
         }
     }
 }
 
 impl Operator for NeOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
         // Try numeric comparison first
-        if let (Ok(a), Ok(b)) = (value.parse::<i64>(), self.expected.parse::<i64>()) {
+        if let (Some(a), Some(b)) = (
+            comparison::integer(value),
+            comparison::integer(&self.expected),
+        ) {
             if a != b {
-                return OperatorResult::matched(value.to_string());
+                return OperatorResult::matched(value);
             }
-        } else if value != self.expected {
+        } else if value != self.expected.as_slice() {
             // String comparison
-            return OperatorResult::matched(value.to_string());
+            return OperatorResult::matched(value);
         }
         OperatorResult::no_match()
     }

@@ -45,7 +45,7 @@ pub(crate) type ValueAt = (usize, usize);
 /// What the chains applied so far made of one value, by
 /// [`TransformationPipeline::chain_key`]. `None` is a chain that left the value
 /// as it was, which is not copied.
-type Chains = Vec<(u32, Option<Box<str>>)>;
+type Chains = Vec<(u32, Option<Box<[u8]>>)>;
 
 /// What each transformation chain made of each resolved value.
 #[derive(Default)]
@@ -71,8 +71,8 @@ impl Transformed {
         &'a mut self,
         at: ValueAt,
         pipeline: &TransformationPipeline,
-        value: &'a str,
-    ) -> Cow<'a, str> {
+        value: &'a [u8],
+    ) -> Cow<'a, [u8]> {
         if pipeline.is_empty() {
             return Cow::Borrowed(value);
         }
@@ -100,7 +100,7 @@ impl Transformed {
                             return Cow::Owned(other.into_owned());
                         }
                         self.kept_bytes += other.len();
-                        Some(other.into_owned().into_boxed_str())
+                        Some(other.into_owned().into_boxed_slice())
                     }
                 };
                 chains.push((key, result));

@@ -961,7 +961,7 @@ impl Transaction {
             // A rule with no variable specs at all (i.e. SecAction) runs its
             // operator unconditionally — this is how CRS sets up TX thresholds.
             if rule.variables.is_empty() {
-                let result = rule.operator.execute("");
+                let result = rule.operator.execute(b"");
                 let matched = if rule.operator_negated {
                     !result.matched
                 } else {
@@ -971,7 +971,11 @@ impl Transaction {
                 // as the match target.
                 return Ok(RuleOutcome {
                     matched,
-                    captures: result.captures,
+                    captures: result
+                        .captures
+                        .iter()
+                        .map(|c| String::from_utf8_lossy(c).into_owned())
+                        .collect(),
                     matches: Vec::new(),
                 });
             }
@@ -1041,12 +1045,12 @@ impl Transaction {
             // What the operator runs against: every step with `multiMatch`,
             // otherwise the value through the whole chain. A value the phase
             // shares is transformed once per distinct chain, not once per rule.
-            let steps: Vec<Cow<'_, str>>;
-            let whole: [Cow<'_, str>; 1];
-            let candidates: &[Cow<'_, str>] = if multi_match {
+            let steps: Vec<Cow<'_, [u8]>>;
+            let whole: [Cow<'_, [u8]>; 1];
+            let candidates: &[Cow<'_, [u8]>] = if multi_match {
                 steps = rule
                     .transformations
-                    .apply_steps(&value)
+                    .apply_steps(value.as_bytes())
                     .into_iter()
                     .map(Cow::Owned)
                     .collect();
@@ -1054,9 +1058,9 @@ impl Transaction {
             } else {
                 whole = [match (at, &value) {
                     (Some(at), Cow::Borrowed(shared)) => {
-                        transformed.apply(at, &rule.transformations, shared)
+                        transformed.apply(at, &rule.transformations, shared.as_bytes())
                     }
-                    _ => rule.transformations.apply(&value),
+                    _ => rule.transformations.apply(value.as_bytes()),
                 }];
                 &whole
             };
@@ -1084,10 +1088,17 @@ impl Transaction {
                         // reported separately, since an audit log wants both:
                         // the value to judge the match, the portion to see what
                         // triggered it.
-                        value: candidate.to_string(),
-                        portion: result.matched_value,
+                        value: String::from_utf8_lossy(candidate).into_owned(),
+                        portion: result
+                            .matched_value
+                            .map(|p| String::from_utf8_lossy(&p).into_owned()),
                     };
-                    matches.push((matched, result.captures));
+                    let captures = result
+                        .captures
+                        .iter()
+                        .map(|c| String::from_utf8_lossy(c).into_owned())
+                        .collect();
+                    matches.push((matched, captures));
                     break;
                 }
             }

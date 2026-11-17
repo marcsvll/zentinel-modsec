@@ -91,10 +91,13 @@ impl IpMatchOperator {
 }
 
 impl Operator for IpMatchOperator {
-    fn execute(&self, value: &str) -> OperatorResult {
-        if let Ok(ip) = value.parse::<IpAddr>() {
+    fn execute(&self, value: &[u8]) -> OperatorResult {
+        let address = std::str::from_utf8(value)
+            .ok()
+            .and_then(|v| v.parse::<IpAddr>().ok());
+        if let Some(ip) = address {
             if self.contains(&ip) {
-                return OperatorResult::matched(value.to_string());
+                return OperatorResult::matched(value);
             }
         }
         OperatorResult::no_match()
@@ -112,39 +115,39 @@ mod tests {
     #[test]
     fn test_ip_match_single() {
         let op = IpMatchOperator::new("192.168.1.1").unwrap();
-        assert!(op.execute("192.168.1.1").matched);
-        assert!(!op.execute("192.168.1.2").matched);
+        assert!(op.execute(b"192.168.1.1").matched);
+        assert!(!op.execute(b"192.168.1.2").matched);
     }
 
     #[test]
     fn test_ip_match_cidr() {
         let op = IpMatchOperator::new("192.168.1.0/24").unwrap();
-        assert!(op.execute("192.168.1.1").matched);
-        assert!(op.execute("192.168.1.255").matched);
-        assert!(!op.execute("192.168.2.1").matched);
+        assert!(op.execute(b"192.168.1.1").matched);
+        assert!(op.execute(b"192.168.1.255").matched);
+        assert!(!op.execute(b"192.168.2.1").matched);
     }
 
     #[test]
     fn test_ip_match_multiple() {
         let op = IpMatchOperator::new("10.0.0.0/8 192.168.0.0/16").unwrap();
-        assert!(op.execute("10.1.2.3").matched);
-        assert!(op.execute("192.168.1.1").matched);
-        assert!(!op.execute("172.16.0.1").matched);
+        assert!(op.execute(b"10.1.2.3").matched);
+        assert!(op.execute(b"192.168.1.1").matched);
+        assert!(!op.execute(b"172.16.0.1").matched);
     }
 
     #[test]
     fn test_ip_match_comma_separated() {
         // CRS REQUEST-905 uses the comma-separated form, e.g. "127.0.0.1,::1".
         let op = IpMatchOperator::new("127.0.0.1,::1").unwrap();
-        assert!(op.execute("127.0.0.1").matched);
-        assert!(op.execute("::1").matched);
-        assert!(!op.execute("10.0.0.1").matched);
+        assert!(op.execute(b"127.0.0.1").matched);
+        assert!(op.execute(b"::1").matched);
+        assert!(!op.execute(b"10.0.0.1").matched);
     }
 
     #[test]
     fn test_ip_match_comma_and_space_mixed() {
         let op = IpMatchOperator::new("10.0.0.0/8, 192.168.0.0/16").unwrap();
-        assert!(op.execute("10.1.2.3").matched);
-        assert!(op.execute("192.168.1.1").matched);
+        assert!(op.execute(b"10.1.2.3").matched);
+        assert!(op.execute(b"192.168.1.1").matched);
     }
 }
