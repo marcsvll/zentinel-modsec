@@ -161,15 +161,21 @@ impl AnomalyScore {
     /// Load scores from TX collection.
     pub fn sync_from_tx<C: crate::variables::Collection>(&mut self, tx: &C) {
         if tx.get(ANOMALY_SCORE).is_some() {
-            self.inbound = crate::variables::first_number(tx.get(ANOMALY_SCORE)) as i32;
+            self.inbound = score(tx.get(ANOMALY_SCORE));
         }
         if tx.get(SQL_INJECTION_SCORE).is_some() {
-            self.sqli = crate::variables::first_number(tx.get(SQL_INJECTION_SCORE)) as i32;
+            self.sqli = score(tx.get(SQL_INJECTION_SCORE));
         }
         if tx.get(XSS_SCORE).is_some() {
-            self.xss = crate::variables::first_number(tx.get(XSS_SCORE)) as i32;
+            self.xss = score(tx.get(XSS_SCORE));
         }
     }
+}
+
+/// A score read from TX: an integer, clamped to what a score can hold.
+fn score(values: Option<Vec<&[u8]>>) -> i32 {
+    let n = crate::variables::first_number(values);
+    i32::try_from(n).unwrap_or(if n < 0 { i32::MIN } else { i32::MAX })
 }
 
 #[cfg(test)]

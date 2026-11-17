@@ -103,3 +103,15 @@ fn validate_utf8_encoding_reads_the_bytes() {
         );
     }
 }
+
+#[test]
+fn a_boundary_that_is_not_ascii_still_frames_the_body() {
+    // The boundary comes from the header's bytes, as the body is read as bytes:
+    // a lossy header against a raw body used to find no part at all.
+    let body: &[u8] = b"--\xff\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n\xac\xed\x00\x05\r\n--\xff--\r\n";
+    assert!(denied(
+        b"/",
+        &[(b"Content-Type", b"multipart/form-data; boundary=\xff")],
+        body
+    ));
+}

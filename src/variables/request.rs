@@ -260,9 +260,11 @@ impl RequestData {
     /// delimiter never comes is a body error (`REQBODY_ERROR`), and the parts read
     /// until then are still inspected. Returns `false` when no boundary parameter
     /// can be extracted from the Content-Type.
-    pub fn parse_multipart_body(&mut self, content_type: &str) -> bool {
+    pub fn parse_multipart_body(&mut self, content_type: impl AsRef<[u8]>) -> bool {
         self.body_processor = "MULTIPART".to_string();
-        let Some((boundary, quoted, whitespace)) = extract_multipart_boundary(content_type) else {
+        let Some((boundary, quoted, whitespace)) =
+            extract_multipart_boundary(content_type.as_ref())
+        else {
             // Without a boundary nothing can be parsed: that is a body error, not an
             // empty body (it used to leave ARGS_POST empty and REQBODY_ERROR at 0, so
             // rule 200002 could not stop it). An empty `boundary=` is treated the same,
@@ -274,8 +276,8 @@ impl RequestData {
         self.multipart.boundary_quoted = quoted;
         self.multipart.boundary_whitespace = whitespace;
         let body = std::mem::take(&mut self.body);
-        let delimiter = format!("--{boundary}").into_bytes();
-        let closing = format!("--{boundary}--").into_bytes();
+        let delimiter = [b"--".as_slice(), &boundary].concat();
+        let closing = [b"--".as_slice(), &boundary, b"--"].concat();
 
         #[derive(PartialEq)]
         enum State {
@@ -905,24 +907,26 @@ fn push_json_arg(
 /// Extract the `boundary` parameter from a multipart Content-Type value, with whether
 /// it was quoted and whether whitespace surrounded the value (ModSecurity keeps that
 /// whitespace in the boundary, so such a body never finds its delimiter).
-fn extract_multipart_boundary(content_type: &str) -> Option<(String, bool, bool)> {
-    for param in content_type.split(';').skip(1) {
-        let param = param.trim_start();
-        if let Some((key, value)) = param.split_once('=') {
-            if key.trim().eq_ignore_ascii_case("boundary") {
-                let value = value.trim_end();
-                let whitespace = value.starts_with([' ', '\t']);
-                let (value, quoted) = match value
-                    .trim_start()
-                    .strip_prefix('"')
-                    .and_then(|v| v.strip_suffix('"'))
-                {
-                    Some(inner) => (inner.to_string(), true),
-                    None => (value.to_string(), false),
-                };
-                if !value.trim().is_empty() {
-                    return Some((value, quoted, whitespace));
-                }
+fn extract_multipart_boundary(content_type: &[u8]) -> Option<(Vec<u8>, bool, bool)> {
+    for param in content_type.split(|&b| b == b';').skip(1) {
+        let param = param.trim_ascii_start();
+        let Some(eq) = param.iter().position(|&b| b == b'=') else {
+            continue;
+        };
+        let (key, value) = (&param[..eq], &param[eq + 1..]);
+        if key.trim_ascii().eq_ignore_ascii_case(b"boundary") {
+            let value = value.trim_ascii_end();
+            let whitespace = value.starts_with(b" ") || value.starts_with(b"\t");
+            let (value, quoted) = match value
+                .trim_ascii_start()
+                .strip_prefix(b"\"")
+                .and_then(|v| v.strip_suffix(b"\""))
+            {
+                Some(inner) => (inner.to_vec(), true),
+                None => (value.to_vec(), false),
+            };
+            if !value.trim_ascii().is_empty() {
+                return Some((value, quoted, whitespace));
             }
         }
     }

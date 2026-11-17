@@ -29,7 +29,14 @@ fn cached_regex(pattern: &str) -> Option<Arc<Regex>> {
     if let Some(hit) = CACHE.read().unwrap_or_else(|e| e.into_inner()).get(pattern) {
         return hit.clone();
     }
-    let compiled = Regex::new(pattern).ok().map(Arc::new);
+    // Over bytes, as `@rx` reads them (a key need not be UTF-8); a pattern
+    // that only makes sense over characters is compiled that way.
+    let compiled = regex::bytes::RegexBuilder::new(pattern)
+        .unicode(false)
+        .build()
+        .or_else(|_| Regex::new(pattern))
+        .ok()
+        .map(Arc::new);
     CACHE
         .write()
         .unwrap_or_else(|e| e.into_inner())

@@ -130,10 +130,12 @@ impl MutableCollection for HashMapCollection {
     fn increment(&mut self, key: impl AsRef<[u8]>, amount: i64) {
         let key = key.as_ref();
         let current = first_number(self.get(key));
-        self.set(key, (current + amount).to_string());
+        self.set(key, current.saturating_add(amount).to_string());
     }
 
     fn decrement(&mut self, key: impl AsRef<[u8]>, amount: i64) {
-        self.increment(key, -amount);
+        let key = key.as_ref();
+        let current = first_number(self.get(key));
+        self.set(key, current.saturating_sub(amount).to_string());
     }
 }

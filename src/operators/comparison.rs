@@ -9,25 +9,24 @@ use super::traits::{Operator, OperatorResult};
 /// Contains operator (@contains).
 pub struct ContainsOperator {
     needle: Vec<u8>,
+    /// A searcher built once, linear in the value: the needle can be request
+    /// data (`@contains %{request_headers.x}`) and the value a whole body.
+    finder: aho_corasick::AhoCorasick,
 }
 
 impl ContainsOperator {
     /// Create the operator from its SecLang argument.
     pub fn new(needle: impl AsRef<[u8]>) -> Self {
-        Self {
-            needle: needle.as_ref().to_vec(),
-        }
+        let needle = needle.as_ref().to_vec();
+        let finder = aho_corasick::AhoCorasick::new([&needle])
+            .expect("one needle of any length always builds");
+        Self { needle, finder }
     }
-}
-
-/// Whether `needle` occurs in `haystack`.
-pub(crate) fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 impl Operator for ContainsOperator {
     fn execute(&self, value: &[u8]) -> OperatorResult {
-        if contains(value, &self.needle) {
+        if self.needle.is_empty() || self.finder.is_match(value) {
             OperatorResult::matched(self.needle.clone())
         } else {
             OperatorResult::no_match()

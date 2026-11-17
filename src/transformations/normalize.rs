@@ -51,7 +51,32 @@ impl Transformation for Uppercase {
     }
 }
 
+/// The length of the whitespace character outside ASCII that `input` starts
+/// with, if it starts with one: a UTF-8 encoded Unicode `White_Space`
+/// character (U+0085, U+00A0, U+1680, U+2000 to U+200A, U+2028, U+2029,
+/// U+202F, U+205F, U+3000) or U+FEFF.
+///
+/// ModSecurity's whitespace is ASCII's. JavaScript reads these as whitespace
+/// too (`this\u{3000}.constructor` is `this.constructor`), so a rule that
+/// removes or compresses whitespace before matching (CRS 934100) must see them
+/// as whitespace: here the engine differs from ModSecurity on purpose.
+fn unicode_space(input: &[u8]) -> Option<usize> {
+    let len = match *input.first()? {
+        0xc2 => 2,
+        0xe1..=0xe3 | 0xef => 3,
+        _ => return None,
+    };
+    let c = std::str::from_utf8(input.get(..len)?)
+        .ok()?
+        .chars()
+        .next()?;
+    (c.is_whitespace() || c == '\u{feff}').then_some(len)
+}
+
 /// Compress whitespace transformation: every run of whitespace is one space.
+///
+/// Whitespace is ASCII's, as in ModSecurity, and the Unicode whitespace
+/// characters of [`unicode_space`].
 pub struct CompressWhitespace;
 
 impl CompressWhitespace {
@@ -59,13 +84,13 @@ impl CompressWhitespace {
     /// without building anything: no whitespace but single spaces.
     fn untouched(input: &[u8]) -> bool {
         let mut after_space = false;
-        for &b in input {
+        for (i, &b) in input.iter().enumerate() {
             if b == b' ' {
                 if after_space {
                     return false;
                 }
                 after_space = true;
-            } else if is_c_space(b) {
+            } else if is_c_space(b) || unicode_space(&input[i..]).is_some() {
                 return false;
             } else {
                 after_space = false;
@@ -77,15 +102,26 @@ impl CompressWhitespace {
     fn full(input: &[u8]) -> Cow<'_, [u8]> {
         let mut out = Vec::with_capacity(input.len());
         let mut in_space = false;
-        for &b in input {
-            if is_c_space(b) {
-                if !in_space {
-                    out.push(b' ');
-                }
-                in_space = true;
+        let mut i = 0;
+        while i < input.len() {
+            let space = if is_c_space(input[i]) {
+                Some(1)
             } else {
-                out.push(b);
-                in_space = false;
+                unicode_space(&input[i..])
+            };
+            match space {
+                Some(len) => {
+                    if !in_space {
+                        out.push(b' ');
+                    }
+                    in_space = true;
+                    i += len;
+                }
+                None => {
+                    out.push(input[i]);
+                    in_space = false;
+                    i += 1;
+                }
             }
         }
         Cow::Owned(out)
@@ -108,7 +144,8 @@ impl Transformation for CompressWhitespace {
 /// Remove whitespace transformation.
 ///
 /// As ModSecurity: ASCII whitespace and the two bytes of a UTF-8 no-break
-/// space (`C2 A0`), each wherever it is.
+/// space (`C2 A0`), each wherever it is; and the Unicode whitespace characters
+/// of [`unicode_space`].
 pub struct RemoveWhitespace;
 
 impl RemoveWhitespace {
@@ -119,17 +156,26 @@ impl RemoveWhitespace {
     /// Whether the transformation would leave `input` as it is, decided
     /// without building anything. With nothing to remove there is nothing to do.
     fn untouched(input: &[u8]) -> bool {
-        !input.iter().any(|&b| Self::removed(b))
+        !input
+            .iter()
+            .enumerate()
+            .any(|(i, &b)| Self::removed(b) || unicode_space(&input[i..]).is_some())
     }
 
     fn full(input: &[u8]) -> Cow<'_, [u8]> {
-        Cow::Owned(
-            input
-                .iter()
-                .copied()
-                .filter(|&b| !Self::removed(b))
-                .collect(),
-        )
+        let mut out = Vec::with_capacity(input.len());
+        let mut i = 0;
+        while i < input.len() {
+            if let Some(len) = unicode_space(&input[i..]) {
+                i += len;
+            } else {
+                if !Self::removed(input[i]) {
+                    out.push(input[i]);
+                }
+                i += 1;
+            }
+        }
+        Cow::Owned(out)
     }
 }
 
@@ -986,6 +1032,27 @@ mod tests {
         assert_eq!(t(&CompressWhitespace, b"hello   world"), b"hello world");
         assert_eq!(t(&CompressWhitespace, b"a\t\nb"), b"a b");
         assert_eq!(t(&CompressWhitespace, b"a\xa0b"), b"a\xa0b");
+    }
+
+    #[test]
+    fn unicode_whitespace_is_whitespace() {
+        // CRS 934100 removes whitespace before looking for `this.constructor`.
+        let ideographic = "this\u{3000}.constructor".as_bytes();
+        assert_eq!(t(&RemoveWhitespace, ideographic), b"this.constructor");
+        assert_eq!(t(&CompressWhitespace, ideographic), b"this .constructor");
+        for c in [
+            '\u{85}', '\u{a0}', '\u{1680}', '\u{2000}', '\u{200a}', '\u{2028}', '\u{202f}',
+            '\u{205f}', '\u{feff}',
+        ] {
+            let value = format!("a{c}b");
+            assert_eq!(t(&RemoveWhitespace, value.as_bytes()), b"ab", "{c:?}");
+            assert_eq!(t(&CompressWhitespace, value.as_bytes()), b"a b", "{c:?}");
+        }
+        // Not whitespace: a letter of the same lead byte, a zero-width joiner.
+        assert_eq!(
+            t(&RemoveWhitespace, "\u{e9}\u{200d}".as_bytes()),
+            "\u{e9}\u{200d}".as_bytes()
+        );
     }
 
     #[test]

@@ -300,10 +300,16 @@ impl Transaction {
             .request
             .headers
             .get("content-type")
-            .and_then(|v| v.first().map(|s| String::from_utf8_lossy(s).into_owned()));
+            .and_then(|v| v.first().map(|s| s.to_vec()));
+        // The media type is ASCII; the boundary is taken from the bytes as they
+        // are, since the body it is looked for in is bytes too.
         let ct_lower = content_type
             .as_deref()
-            .map(|ct| ct.trim_start().to_ascii_lowercase())
+            .map(|ct| {
+                String::from_utf8_lossy(ct)
+                    .trim_start()
+                    .to_ascii_lowercase()
+            })
             .unwrap_or_default();
 
         // ctl:requestBodyAccess=Off, typically set in phase 1, suppresses body
