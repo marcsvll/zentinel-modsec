@@ -84,6 +84,8 @@ pub struct RxOperator {
     mode: Mode,
     /// What a value must hold for the pattern to match it (byte mode only).
     need: Option<Need>,
+    /// Literals of which a matching value contains one (byte mode only).
+    literals: Option<Vec<Vec<u8>>>,
     /// `None` once compilation has been attempted and failed, so a pattern
     /// that passes syntax validation but cannot be built (an oversized
     /// program, say) is reported once rather than retried per request.
@@ -107,10 +109,15 @@ impl RxOperator {
         }
 
         let as_bytes = as_bytes_pattern(pattern);
-        let (mode, pattern, need) = match parse(Mode::Bytes, &as_bytes) {
-            Ok(hir) => (Mode::Bytes, as_bytes.as_str(), Need::of_regex(&hir)),
+        let (mode, pattern, need, literals) = match parse(Mode::Bytes, &as_bytes) {
+            Ok(hir) => (
+                Mode::Bytes,
+                as_bytes.as_str(),
+                Need::of_regex(&hir),
+                crate::prefilter::regex_literals(&hir),
+            ),
             Err(_) => match parse(Mode::Characters, pattern) {
-                Ok(_) => (Mode::Characters, pattern, None),
+                Ok(_) => (Mode::Characters, pattern, None, None),
                 Err(error) => {
                     return Err(Error::RegexCompile {
                         pattern: pattern.to_string(),
@@ -124,6 +131,7 @@ impl RxOperator {
             pattern_str: pattern.to_string(),
             mode,
             need,
+            literals,
             compiled: OnceCell::new(),
         })
     }
@@ -192,6 +200,10 @@ impl Operator for RxOperator {
 
     fn need(&self) -> Option<Need> {
         self.need
+    }
+
+    fn literals(&self) -> Option<Vec<Vec<u8>>> {
+        self.literals.clone()
     }
 
     fn supports_capture(&self) -> bool {
@@ -304,6 +316,16 @@ impl Operator for PmOperator {
 
     fn need(&self) -> Option<Need> {
         Need::of_any_literal(self.patterns.iter().map(String::as_bytes), true)
+    }
+
+    /// The phrases themselves: a value matches exactly when it contains one.
+    fn literals(&self) -> Option<Vec<Vec<u8>>> {
+        Some(
+            self.patterns
+                .iter()
+                .map(|p| p.as_bytes().to_ascii_lowercase())
+                .collect(),
+        )
     }
 }
 

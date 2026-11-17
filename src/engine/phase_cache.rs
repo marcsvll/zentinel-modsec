@@ -11,6 +11,7 @@
 
 use std::borrow::Cow;
 
+use crate::engine::ruleset::LiteralIndex;
 use crate::parser::{Selection, VariableName, VariableSpec};
 use crate::transformations::TransformationPipeline;
 use crate::variables::VariableResolver;
@@ -57,6 +58,14 @@ pub(crate) struct Transformed {
     raw_classes: Vec<Vec<u64>>,
     /// Per slot and chain, the classes of bytes of each value after the chain.
     classes: Vec<Vec<((u32, bool), Vec<u64>)>>,
+    /// Per slot and value, which rules of the phase's literal index the value
+    /// as resolved can match: a place in `sets` ([`UNSCANNED`] until asked).
+    raw_hits: Vec<Vec<u32>>,
+    /// Per slot and chain, the same for each value after the chain.
+    hits: Vec<Vec<HitsOfChain>>,
+    /// The sets of rules `raw_hits` and `hits` point into, each of the index's
+    /// number of words; the first is the empty set.
+    sets: Vec<u64>,
     /// Bytes of transformed text kept so far.
     kept_bytes: usize,
 }
@@ -124,6 +133,131 @@ impl Transformed {
 }
 
 impl Transformed {
+    /// Whether `pipeline` is known to leave the value at `at` as it is, from
+    /// the classes of its bytes alone (see
+    /// [`TransformationPipeline::touches`]).
+    pub(crate) fn untouched(
+        &mut self,
+        at: ValueAt,
+        pipeline: &TransformationPipeline,
+        value: &[u8],
+    ) -> bool {
+        pipeline.is_empty()
+            || pipeline
+                .touches()
+                .is_some_and(|t| self.raw_classes(at, value) & t == 0)
+    }
+
+    /// File a set of rules and say where; the empty set is always [`NO_RULE`].
+    fn file(&mut self, set: &[u64]) -> u32 {
+        if set.iter().all(|w| *w == 0) {
+            return NO_RULE;
+        }
+        if self.sets.is_empty() {
+            // The first place is the empty set's.
+            self.sets.resize(set.len(), 0);
+        }
+        self.sets.extend_from_slice(set);
+        (self.sets.len() / set.len() - 1) as u32
+    }
+
+    /// Which rules of the phase's literal index every value of a slot can
+    /// match after `pipeline`, in the slot's order. As for
+    /// [`classes`](Self::classes): computed once per slot and chain, a value
+    /// the chain leaves alone is scanned once whatever the chain, and with
+    /// `every_step` a value the chain touches rules nothing out.
+    fn hits(
+        &mut self,
+        slot: usize,
+        pipeline: &TransformationPipeline,
+        every_step: bool,
+        values: &[(Vec<u8>, Vec<u8>)],
+        index: &LiteralIndex,
+    ) -> usize {
+        if self.hits.len() <= slot {
+            self.hits.resize_with(slot + 1, Vec::new);
+            self.raw_hits.resize_with(slot + 1, Vec::new);
+        }
+        if self.raw_hits[slot].len() < values.len() {
+            self.raw_hits[slot].resize(values.len(), UNSCANNED);
+        }
+        let key = (pipeline.chain_key(), every_step);
+        let found = match self.hits[slot].iter().position(|(k, _, _)| *k == key) {
+            Some(found) => found,
+            None => {
+                let mut of_value = Vec::with_capacity(values.len());
+                let mut found_in_form = vec![0u64; index.words()];
+                for (item, (_, value)) in values.iter().enumerate() {
+                    let raw = self.raw_classes((slot, item), value);
+                    let untouched = pipeline.touches().is_some_and(|t| raw & t == 0);
+                    if every_step && !untouched {
+                        of_value.push(EVERY_RULE);
+                        continue;
+                    }
+                    // The form the operator sees, if the chain changes the value:
+                    // scanned into `found_in_form`, since the form is borrowed
+                    // from the cache the sets are kept in.
+                    found_in_form.iter_mut().for_each(|w| *w = 0);
+                    let changed = if untouched {
+                        false
+                    } else {
+                        match self.apply((slot, item), pipeline, value) {
+                            Cow::Borrowed(same)
+                                if same.len() == value.len() && same.as_ptr() == value.as_ptr() =>
+                            {
+                                false
+                            }
+                            form => {
+                                index.scan(&form, &mut found_in_form);
+                                true
+                            }
+                        }
+                    };
+                    of_value.push(if changed {
+                        self.file(&found_in_form)
+                    } else {
+                        if self.raw_hits[slot][item] == UNSCANNED {
+                            index.scan(value, &mut found_in_form);
+                            self.raw_hits[slot][item] = self.file(&found_in_form);
+                        }
+                        self.raw_hits[slot][item]
+                    });
+                }
+                let with_a_literal = (0..of_value.len() as u32)
+                    .filter(|&i| of_value[i as usize] != NO_RULE)
+                    .collect();
+                self.hits[slot].push((key, of_value, with_a_literal));
+                self.hits[slot].len() - 1
+            }
+        };
+        found
+    }
+
+    /// What is known, before any operator runs, about which values of a slot
+    /// a rule can match after `pipeline`: their classes of bytes when the rule
+    /// has a need, the rules whose literals they contain when it has literals.
+    pub(crate) fn candidates(
+        &mut self,
+        slot: usize,
+        pipeline: &TransformationPipeline,
+        every_step: bool,
+        values: &[(Vec<u8>, Vec<u8>)],
+        with_classes: bool,
+        index: Option<&LiteralIndex>,
+    ) -> Candidates<'_> {
+        let classes = with_classes.then(|| self.classes(slot, pipeline, every_step, values));
+        let hits = index.map(|index| (self.hits(slot, pipeline, every_step, values, index), index));
+        Candidates {
+            classes: classes.map(|found| self.classes[slot][found].1.as_slice()),
+            hits: hits.map(|(found, index)| Hits {
+                of_value: &self.hits[slot][found].1,
+                with_a_literal: &self.hits[slot][found].2,
+                sets: &self.sets,
+                words: index.words(),
+            }),
+        }
+    }
+
     /// The classes of bytes of a value as resolved, summarized on first use.
     fn raw_classes(&mut self, (slot, item): ValueAt, value: &[u8]) -> u64 {
         if self.raw_classes.len() <= slot {
@@ -149,13 +283,13 @@ impl Transformed {
     /// before the chain and after each step, so only a value the chain is
     /// known not to touch has one form to summarize; any other is given every
     /// class, which no need rules out.
-    pub(crate) fn classes(
+    fn classes(
         &mut self,
         slot: usize,
         pipeline: &TransformationPipeline,
         every_step: bool,
         values: &[(Vec<u8>, Vec<u8>)],
-    ) -> &[u64] {
+    ) -> usize {
         if self.classes.len() <= slot {
             self.classes.resize_with(slot + 1, Vec::new);
         }
@@ -185,7 +319,55 @@ impl Transformed {
                 self.classes[slot].len() - 1
             }
         };
-        &self.classes[slot][found].1
+        found
+    }
+}
+
+/// The set of no rule: most values contain no literal of any rule.
+const NO_RULE: u32 = 0;
+/// A value whose forms are not all known (`multiMatch` on a value the chain
+/// touches): no rule is ruled out.
+const EVERY_RULE: u32 = u32::MAX;
+/// A value not scanned yet.
+const UNSCANNED: u32 = u32::MAX - 1;
+
+/// For one chain (its key and whether every step counts): the set of rules
+/// each value can match, and the values that can match some rule.
+type HitsOfChain = ((u32, bool), Vec<u32>, Vec<u32>);
+
+/// See [`Transformed::candidates`].
+pub(crate) struct Candidates<'a> {
+    pub(crate) classes: Option<&'a [u64]>,
+    pub(crate) hits: Option<Hits<'a>>,
+}
+
+/// Which rules of a phase's literal index each value of a slot can match.
+pub(crate) struct Hits<'a> {
+    of_value: &'a [u32],
+    with_a_literal: &'a [u32],
+    sets: &'a [u64],
+    words: usize,
+}
+
+impl Hits<'_> {
+    /// The values that hold a literal of some rule (or whose forms are not
+    /// all known), in the slot's order: the only ones a rule with literals
+    /// can match.
+    pub(crate) fn with_a_literal(&self) -> &[u32] {
+        self.with_a_literal
+    }
+
+    /// Whether the value at `item` contains a literal of `rule`.
+    #[inline]
+    pub(crate) fn allows(&self, item: usize, rule: u16) -> bool {
+        match self.of_value[item] {
+            NO_RULE => false,
+            EVERY_RULE => true,
+            set => {
+                let rule = usize::from(rule);
+                self.sets[set as usize * self.words + rule / 64] & (1 << (rule % 64)) != 0
+            }
+        }
     }
 }
 

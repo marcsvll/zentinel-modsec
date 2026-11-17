@@ -912,6 +912,14 @@ impl Transaction {
         } = cache;
         let resolved_values: &Resolved = resolved;
 
+        // What the operator requires of a value, when that is known: the
+        // classes of bytes it must hold, and its place in the phase's index of
+        // literals (see `crate::prefilter`).
+        let need = rule.need;
+        let literal = rule
+            .literal
+            .and_then(|l| Some((l, self.ruleset.literals(rule.phase)?)));
+
         // Name, value and, for a value shared by the phase, where it is kept.
         let mut all_values: Vec<NamedValue<'_>> = Vec::new();
         let mut any_excluded = false;
@@ -945,32 +953,50 @@ impl Transaction {
                     // rule whose operator runs on the values themselves has a
                     // `need` (no count, no negation), so nothing else of the
                     // rule depends on the values left out.
-                    let classes = match (rule.need.filter(|_| self.prefilter), slot) {
-                        (Some(need), Some(slot)) => {
-                            let every_step = has_multi_match(rule);
-                            let classes = transformed.classes(
+                    let candidates = match slot {
+                        Some(slot) if self.prefilter && (need.is_some() || literal.is_some()) => {
+                            Some(transformed.candidates(
                                 slot,
                                 &rule.transformations,
-                                every_step,
+                                has_multi_match(rule),
                                 values,
-                            );
-                            Some((need, classes))
+                                need.is_some(),
+                                literal.map(|(_, index)| index),
+                            ))
                         }
                         _ => None,
                     };
-                    for (item, (name, value)) in values.iter().enumerate() {
-                        if let Some((need, classes)) = &classes {
-                            if !need.allows(classes[item]) {
-                                continue;
+                    let mut consider = |item: usize| {
+                        let (name, value) = &values[item];
+                        if let Some(candidates) = &candidates {
+                            if let (Some(need), Some(classes)) = (need, candidates.classes) {
+                                if !need.allows(classes[item]) {
+                                    return;
+                                }
+                            }
+                            if let (Some((rule, _)), Some(hits)) = (literal, &candidates.hits) {
+                                if !hits.allows(item, rule) {
+                                    return;
+                                }
                             }
                         }
                         if keep(name) {
                             all_values.push((
-                                Cow::Borrowed(name),
-                                Cow::Borrowed(value),
+                                Cow::Borrowed(name.as_slice()),
+                                Cow::Borrowed(value.as_slice()),
                                 slot.map(|slot| (slot, item)),
                             ));
                         }
+                    };
+                    // A rule with literals looks only at the values that hold
+                    // a literal of some rule, usually a few; in order, as all
+                    // of them would be.
+                    match candidates.as_ref().and_then(|c| c.hits.as_ref()) {
+                        Some(hits) if literal.is_some() => hits
+                            .with_a_literal()
+                            .iter()
+                            .for_each(|&i| consider(i as usize)),
+                        _ => (0..values.len()).for_each(&mut consider),
                     }
                 }
                 Cow::Owned(values) => {
@@ -1068,7 +1094,18 @@ impl Transaction {
             // shares is transformed once per distinct chain, not once per rule.
             let steps: Vec<Cow<'_, [u8]>>;
             let whole: [Cow<'_, [u8]>; 1];
-            let candidates: &[Cow<'_, [u8]>] = if multi_match {
+            // A value the chain does not touch is its only step: the value.
+            let untouched = multi_match
+                && match (at, &value) {
+                    (Some(at), Cow::Borrowed(shared)) => {
+                        transformed.untouched(at, &rule.transformations, shared)
+                    }
+                    _ => false,
+                };
+            let candidates: &[Cow<'_, [u8]>] = if untouched {
+                whole = [Cow::Borrowed(value.as_ref())];
+                &whole
+            } else if multi_match {
                 steps = rule
                     .transformations
                     .apply_steps(&value)

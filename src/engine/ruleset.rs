@@ -43,6 +43,89 @@ pub struct CompiledRule {
     /// be prefiltered (see [`crate::prefilter`]): a plain operator, not
     /// negated, without a macro or a count.
     pub need: Option<Need>,
+    /// The rule's place in its phase's [`LiteralIndex`], when its operator
+    /// says which literals a matching value contains.
+    pub literal: Option<u16>,
+}
+
+/// The literals of every rule of a phase that has some, in one automaton: one
+/// pass over a value says which of those rules it can match.
+pub struct LiteralIndex {
+    automaton: aho_corasick::AhoCorasick,
+    /// For each pattern of the automaton, the rule ([`CompiledRule::literal`])
+    /// it belongs to.
+    owner: Vec<u16>,
+    rules: usize,
+}
+
+impl LiteralIndex {
+    /// How many 64-bit words a set of this index's rules takes.
+    pub fn words(&self) -> usize {
+        self.rules.div_ceil(64)
+    }
+
+    /// Set, in `set` (of [`words`](Self::words) words), the rules one of whose
+    /// literals `value` contains, compared without regard to ASCII case.
+    pub fn scan(&self, value: &[u8], set: &mut [u64]) {
+        for found in self.automaton.find_overlapping_iter(value) {
+            let rule = usize::from(self.owner[found.pattern().as_usize()]);
+            set[rule / 64] |= 1 << (rule % 64);
+        }
+    }
+}
+
+/// Give every rule that can be prefiltered its [`Need`] and its place in the
+/// phase's [`LiteralIndex`] (see [`crate::prefilter`]). A negated operator
+/// matches what the pattern does not; a macro makes the operand per request; a
+/// count is not a value of the request: such rules get neither and run on
+/// every value. Done last, once the targets are final.
+fn index_prefilter(ruleset: &mut CompiledRuleset) {
+    for (phase, rules) in ruleset.rules.by_phase.iter_mut() {
+        let mut patterns: Vec<Vec<u8>> = Vec::new();
+        let mut owner: Vec<u16> = Vec::new();
+        let mut indexed = 0u16;
+        for rule in rules.iter_mut() {
+            let prefilterable = !rule.operator_negated
+                && !rule.operator_spec.argument.contains("%{")
+                && !rule.variables.is_empty()
+                && !rule.variables.iter().any(|v| v.count_mode);
+            if !prefilterable {
+                continue;
+            }
+            rule.need = rule.operator.need();
+            let Some(literals) = rule.operator.literals() else {
+                continue;
+            };
+            // An empty literal is in every value: nothing to look for.
+            if literals.is_empty() || literals.iter().any(Vec::is_empty) || indexed == u16::MAX {
+                continue;
+            }
+            rule.literal = Some(indexed);
+            owner.extend(std::iter::repeat_n(indexed, literals.len()));
+            patterns.extend(literals);
+            indexed += 1;
+        }
+        if patterns.is_empty() {
+            continue;
+        }
+        match aho_corasick::AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build(&patterns)
+        {
+            Ok(automaton) => {
+                ruleset.rules.literals.insert(
+                    *phase,
+                    LiteralIndex {
+                        automaton,
+                        owner,
+                        rules: usize::from(indexed),
+                    },
+                );
+            }
+            // Without the automaton the rules run on every value, as before.
+            Err(_) => rules.iter_mut().for_each(|rule| rule.literal = None),
+        }
+    }
 }
 
 impl std::fmt::Debug for CompiledRule {
@@ -66,6 +149,8 @@ pub struct Rules {
     /// the phase of the rules written around it, so a phase-2 `skipAfter` must
     /// be able to resume at the phase-2 position of the same marker.
     markers: HashMap<String, HashMap<Phase, usize>>,
+    /// Per phase, the literals of its rules (see [`LiteralIndex`]).
+    literals: HashMap<Phase, LiteralIndex>,
 }
 
 impl Rules {
@@ -73,6 +158,7 @@ impl Rules {
     pub fn new() -> Self {
         Self {
             by_phase: HashMap::new(),
+            literals: HashMap::new(),
             markers: HashMap::new(),
         }
     }
@@ -261,17 +347,11 @@ impl CompiledRuleset {
                             _ => None,
                         })
                         .collect();
-                    // A negated operator matches what the pattern does not; a
-                    // macro makes the operand per request; a count is not a
-                    // value of the request.
-                    let prefilterable = !operator_negated
-                        && !operator_spec.argument.contains("%{")
-                        && !rule.variables.iter().any(|v| v.count_mode);
-                    let need = prefilterable.then(|| operator.need()).flatten();
                     let compiled = CompiledRule {
                         id,
                         phase,
-                        need,
+                        need: None,
+                        literal: None,
                         variables: rule.variables,
                         operator,
                         operator_negated,
@@ -333,6 +413,7 @@ impl CompiledRuleset {
                         is_chain: false,
                         chain_next: None,
                         need: None,
+                        literal: None,
                     };
 
                     ruleset.rules.add(phase, compiled);
@@ -353,6 +434,7 @@ impl CompiledRuleset {
         }
 
         apply_target_updates(&mut ruleset, &target_updates);
+        index_prefilter(&mut ruleset);
 
         Ok(ruleset)
     }
@@ -360,6 +442,11 @@ impl CompiledRuleset {
     /// Get rules for a phase.
     pub fn rules_for_phase(&self, phase: Phase) -> &[CompiledRule] {
         self.rules.for_phase(phase)
+    }
+
+    /// The literal index of a phase, if any of its rules has literals.
+    pub fn literals(&self, phase: Phase) -> Option<&LiteralIndex> {
+        self.rules.literals.get(&phase)
     }
 
     /// Get total rule count.

@@ -59,6 +59,14 @@ pub trait Operator: Send + Sync {
         None
     }
 
+    /// Literals of which a value must contain at least one, compared without
+    /// regard to ASCII case and given in lower case, for this operator to
+    /// match it (see [`crate::prefilter::regex_literals`]). `None` (the
+    /// default) when no such set is known.
+    fn literals(&self) -> Option<Vec<Vec<u8>>> {
+        None
+    }
+
     /// Whether this operator supports capture groups.
     fn supports_capture(&self) -> bool {
         false
